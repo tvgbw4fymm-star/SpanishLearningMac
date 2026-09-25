@@ -72,6 +72,42 @@ struct AudioPipelineSmoke {
         precondition(punctuation[1].transcript == "¿Cómo estás?")
         precondition(punctuationSegmenter.finish().isEmpty)
 
+        var targetSegmenter = NativeSpeechSentenceSegmenter()
+        let targetSentences = targetSegmenter.consume((0..<12).map {
+            NativeSpeechSegment(substring: "palabra\($0)", timestamp: Double($0) * 0.8,
+                                duration: 0.5)
+        })
+        let targetTail = targetSegmenter.finish()
+        let targetAll = targetSentences + targetTail
+        precondition(targetAll.count == 1)
+        precondition(targetAll[0].startSeconds < targetAll[0].endSeconds)
+        precondition(targetAll[0].endSeconds - targetAll[0].startSeconds <= 15)
+
+        var shortMergeSegmenter = NativeSpeechSentenceSegmenter()
+        let shortMergeFirst = shortMergeSegmenter.consume([
+            NativeSpeechSegment(substring: "Muy", timestamp: 0, duration: 0.4),
+            NativeSpeechSegment(substring: "bien", timestamp: 0.5, duration: 0.4),
+            NativeSpeechSegment(substring: "hoy", timestamp: 1.9, duration: 0.5),
+            NativeSpeechSegment(substring: "también", timestamp: 2.5, duration: 0.5),
+        ])
+        let shortMergeTail = shortMergeSegmenter.finish()
+        let shortMergeAll = shortMergeFirst + shortMergeTail
+        precondition(shortMergeAll.count == 1)
+        precondition(shortMergeAll[0].transcript == "Muy bien hoy también")
+        precondition(shortMergeAll[0].endSeconds - shortMergeAll[0].startSeconds <= 12)
+
+        var unsafeMergeSegmenter = NativeSpeechSentenceSegmenter()
+        precondition(unsafeMergeSegmenter.consume([
+            NativeSpeechSegment(substring: "Corto", timestamp: 0, duration: 0.5),
+        ]).isEmpty)
+        let unsafeFirst = unsafeMergeSegmenter.consume([
+            NativeSpeechSegment(substring: "Largo", timestamp: 3, duration: 1),
+        ])
+        let unsafeTail = unsafeMergeSegmenter.finish()
+        precondition(unsafeFirst.count == 1 && unsafeTail.count == 1)
+        precondition(unsafeFirst[0].transcript == "Corto")
+        precondition(unsafeTail[0].transcript == "Largo")
+
         var pauseSegmenter = NativeSpeechSentenceSegmenter()
         let pauseFirst = pauseSegmenter.consume([
             NativeSpeechSegment(substring: "Primera", timestamp: 0, duration: 1),
@@ -79,8 +115,8 @@ struct AudioPipelineSmoke {
         ])
         precondition(pauseFirst.isEmpty)
         let pauseSecond = pauseSegmenter.consume([
-            NativeSpeechSegment(substring: "Segunda", timestamp: 3.0, duration: 1),
-            NativeSpeechSegment(substring: "frase", timestamp: 4.1, duration: 1)
+            NativeSpeechSegment(substring: "Segunda", timestamp: 3.6, duration: 1),
+            NativeSpeechSegment(substring: "frase", timestamp: 4.7, duration: 1)
         ])
         precondition(pauseSecond.count == 1)
         precondition(pauseSecond[0].transcript == "Primera frase")
@@ -145,6 +181,18 @@ struct AudioPipelineSmoke {
         ]) + abnormalSegmenter.finish()
         precondition(abnormal.count == 1)
         precondition(abnormal[0].startSeconds < abnormal[0].endSeconds)
+        precondition(abnormal[0].endSeconds - abnormal[0].startSeconds == 25)
+
+        func assertTimeline(_ sentences: [ListeningSentence]) {
+            precondition(sentences.allSatisfy { $0.startSeconds < $0.endSeconds })
+            precondition(zip(sentences, sentences.dropFirst()).allSatisfy {
+                $0.endSeconds <= $1.startSeconds
+            })
+        }
+        [punctuation, targetAll, shortMergeAll, unsafeFirst,
+         pauseFirst + pauseTail, shortPause + shortPauseTail,
+         crossChunkPause + crossChunkPauseTail, longSentences,
+         chunkSentences, abnormal].forEach(assertTimeline)
 
         print("Audio pipeline smoke passed: native WAV slicing and timestamped sentence parsing")
     }

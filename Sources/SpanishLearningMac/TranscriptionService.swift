@@ -55,12 +55,16 @@ struct NativeSpeechSegment: Equatable, Sendable {
 }
 
 struct NativeSpeechSentenceSegmenter {
-    private static let softLimit = 10.0
-    private static let hardLimit = 18.0
+    private static let targetDuration = 9.0
+    private static let preferredMaximum = 12.0
+    private static let hardLimit = 15.0
     private static let pauseThreshold = 0.65
+    private static let shortFragmentLimit = 3.0
+    private static let shortMergePauseLimit = 1.2
     private static let sentenceTerminators = CharacterSet(charactersIn: ".?!。！？")
 
     private var pending: [NativeSpeechSegment] = []
+    private var shortFragment: [NativeSpeechSegment]?
     private var lastEmittedEnd: Double?
 
     mutating func consume(_ segments: [NativeSpeechSegment]) -> [ListeningSentence] {
@@ -69,16 +73,22 @@ struct NativeSpeechSentenceSegmenter {
         while let boundary = boundaryIndex() {
             let group = Array(pending.prefix(through: boundary))
             pending.removeFirst(boundary + 1)
-            result.append(makeSentence(from: group))
+            result.append(contentsOf: emit(group))
         }
         return result
     }
 
     mutating func finish() -> [ListeningSentence] {
-        guard !pending.isEmpty else { return [] }
-        let sentence = makeSentence(from: pending)
-        pending.removeAll()
-        return [sentence]
+        var result: [ListeningSentence] = []
+        if !pending.isEmpty {
+            result.append(contentsOf: emit(pending))
+            pending.removeAll()
+        }
+        if let shortFragment {
+            result.append(makeSentence(from: shortFragment))
+            self.shortFragment = nil
+        }
+        return result
     }
 
     private func boundaryIndex() -> Int? {
@@ -100,11 +110,56 @@ struct NativeSpeechSentenceSegmenter {
             if elapsed >= Self.hardLimit {
                 return index
             }
-            if elapsed >= Self.softLimit, index + 1 < pending.count {
+            if elapsed >= Self.targetDuration,
+               index + 1 < pending.count,
+               pending[index + 1].timestamp - segment.end >= 0.2 {
                 return index
             }
         }
         return nil
+    }
+
+    private mutating func emit(_ group: [NativeSpeechSegment]) -> [ListeningSentence] {
+        guard !group.isEmpty else { return [] }
+        guard let shortFragment else {
+            if duration(of: group) < Self.shortFragmentLimit {
+                if endsSentence(group.last?.substring ?? "") {
+                    return [makeSentence(from: group)]
+                }
+                if let next = pending.first,
+                   next.timestamp - (group.last?.end ?? next.timestamp) >= Self.shortMergePauseLimit {
+                    return [makeSentence(from: group)]
+                }
+                self.shortFragment = group
+                return []
+            }
+            return [makeSentence(from: group)]
+        }
+
+        let gap = group[0].timestamp - (shortFragment.last?.end ?? group[0].timestamp)
+        let combinedDuration = group.last!.end - shortFragment[0].timestamp
+        if duration(of: shortFragment) < Self.shortFragmentLimit,
+           !endsSentence(shortFragment.last?.substring ?? ""),
+           gap >= 0,
+           gap < Self.shortMergePauseLimit,
+           combinedDuration <= Self.preferredMaximum {
+            self.shortFragment = nil
+            return [makeSentence(from: shortFragment + group)]
+        }
+
+        self.shortFragment = nil
+        var result = [makeSentence(from: shortFragment)]
+        if duration(of: group) < Self.shortFragmentLimit {
+            self.shortFragment = group
+        } else {
+            result.append(makeSentence(from: group))
+        }
+        return result
+    }
+
+    private func duration(of group: [NativeSpeechSegment]) -> Double {
+        guard let first = group.first, let last = group.last else { return 0 }
+        return last.end - first.timestamp
     }
 
     private func endsSentence(_ text: String) -> Bool {
