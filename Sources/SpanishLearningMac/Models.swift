@@ -183,6 +183,7 @@ struct SourceReference: Codable {
 struct StudyCard: Codable, Identifiable {
     var id: UUID
     var category: CardCategory
+    var title: String? = nil
     var question: String
     var answer: String
     var sources: [SourceReference]
@@ -192,6 +193,7 @@ struct StudyCard: Codable, Identifiable {
     var createdAt: Date? = nil
     var updatedAt: Date? = nil
     var revisionCount: Int? = nil
+    var deletedAt: Date? = nil
     /// Stable semantic identity produced by the study AI. Cards with the same
     /// category and key share one review history while retaining every source.
     var mergeKey: String? = nil

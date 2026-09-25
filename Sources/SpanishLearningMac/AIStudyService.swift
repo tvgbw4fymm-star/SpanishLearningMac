@@ -23,8 +23,33 @@ struct ListeningCardsResult: Decodable, Sendable {
         let requestID: String
         let category: CardCategory
         let mergeKey: String
+        let title: String?
         let question: String
         let answer: String
+
+        init(requestID: String, category: CardCategory, mergeKey: String,
+             title: String? = nil, question: String, answer: String) {
+            self.requestID = requestID
+            self.category = category
+            self.mergeKey = mergeKey
+            self.title = title
+            self.question = question
+            self.answer = answer
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestID, category, mergeKey, title, question, answer
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            requestID = try container.decode(String.self, forKey: .requestID)
+            category = try container.decode(CardCategory.self, forKey: .category)
+            mergeKey = try container.decode(String.self, forKey: .mergeKey)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
+            question = try container.decode(String.self, forKey: .question)
+            answer = try container.decode(String.self, forKey: .answer)
+        }
     }
     let cards: [Card]
 
@@ -139,10 +164,11 @@ enum AIStudyService {
                             "requestID": ["type": "string", "description": "复制对应要点的 ID"],
                             "category": ["type": "string", "enum": cardCategories],
                             "mergeKey": ["type": "string", "description": "稳定的语义键：分类|西语词元、结构或知识主题|具体义项。相同内容必须复用；同一词不同义项必须不同。"],
+                            "title": ["type": ["string", "null"], "description": "可选的极简学习点名称，不写解释句。"],
                             "question": ["type": "string"],
                             "answer": ["type": "string"]
                         ],
-                        "required": ["requestID", "category", "mergeKey", "question", "answer"],
+                        "required": ["requestID", "category", "mergeKey", "title", "question", "answer"],
                         "additionalProperties": false
                     ]
                 ]
@@ -157,7 +183,7 @@ enum AIStudyService {
         """
 
     private static let listeningCardsInstructions = """
-        你是严谨的西班牙语学习卡片教师。只根据用户手工填写的积累要点，为每个要点生成一张学习卡。不要分析听辨困难，不要生成或修改 Listening analysis，不要自行增加用户没有填写的学习点。原样复制每个要点的 ID 到 requestID，每个要点必须且只能对应一张卡。卡片问题简洁，答案适合以后复习。遇到动词时，先说明本质语义，再解释原句中的具体作用，并给出一到两个不同语境的西语例句及中文说明。每张卡必须生成稳定的 mergeKey。
+        你是严谨的西班牙语学习卡片教师。只根据用户手工填写的积累要点，为每个要点生成一张学习卡。不要分析听辨困难，不要生成或修改 Listening analysis，不要自行增加用户没有填写的学习点。原样复制每个要点的 ID 到 requestID，每个要点必须且只能对应一张卡。title 只写最短的单词、短语或语法结构名称，不要写解释句。卡片问题简洁，答案适合以后复习。遇到动词时，先说明本质语义，再解释原句中的具体作用，并给出一到两个不同语境的西语例句及中文说明。每张卡必须生成稳定的 mergeKey。
         """
 
 }

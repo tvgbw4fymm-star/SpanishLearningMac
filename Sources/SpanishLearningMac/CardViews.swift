@@ -14,15 +14,18 @@ struct CardsView: View {
     @Binding var query: String
     @Binding var showDueCards: Bool
     @State private var selectedCardID: UUID?
+    @State private var showingTrash = false
 
     private var cards: [StudyCard] {
         store.data.cards.filter { card in
+            guard card.deletedAt == nil else { return false }
             let sectionMatches: Bool
             switch section {
             case .drafts: sectionMatches = card.confirmedAt == nil
             case .due: sectionMatches = card.confirmedAt != nil && (card.dueAt ?? .distantPast) <= .now
             case .all: sectionMatches = true
             }
+
             let categoryMatches = category == nil || card.category == category
             let searchMatches = query.isEmpty || card.question.localizedCaseInsensitiveContains(query) ||
                 card.answer.localizedCaseInsensitiveContains(query)
@@ -33,6 +36,11 @@ struct CardsView: View {
         }
     }
 
+    private var trashCards: [StudyCard] {
+        store.data.cards.filter { $0.deletedAt != nil }
+            .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             PageHeading(eyebrow: "Card library", title: "让学过的内容，真正留下来。",
@@ -40,6 +48,15 @@ struct CardsView: View {
             StudyChoiceBar(title: "卡片范围", options: CardLibrarySection.allCases,
                            selection: $section) { "\($0.rawValue) \(count(for: $0))" }
             HStack {
+                Button(showingTrash ? "返回卡片" : "回收站") { showingTrash.toggle() }
+                    .buttonStyle(AppActionButtonStyle(prominent: showingTrash))
+                if showingTrash {
+                    Text("已移入回收站的卡片不会参与复习。")
+                        .font(AppType.ui(13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !showingTrash { HStack {
                 Picker("分类", selection: $category) {
                     Text("全部分类").tag(Optional<CardCategory>.none)
                     ForEach(CardCategory.allCases) { item in Text(item.rawValue).tag(Optional(item)) }
@@ -51,12 +68,12 @@ struct CardsView: View {
                     .textFieldStyle(.roundedBorder)
                     .controlSize(.large)
                     .frame(maxWidth: 360)
-            }
-            if cards.isEmpty {
+            } }
+            if (showingTrash ? trashCards : cards).isEmpty {
                 StudyEmptyState(title: emptyTitle, message: emptyDescription,
                                 symbol: "rectangle.on.rectangle")
             } else {
-                List(cards) { card in
+                List(showingTrash ? trashCards : cards) { card in
                     Button { selectedCardID = card.id } label: {
                         CardLibraryRow(card: card)
                     }
@@ -70,6 +87,7 @@ struct CardsView: View {
             }
         }
         .padding(32)
+        .background(.clear)
         .onAppear {
             if showDueCards {
                 section = .due
@@ -96,44 +114,50 @@ struct CardsView: View {
 
     private func count(for section: CardLibrarySection) -> Int {
         switch section {
-        case .drafts: store.data.cards.filter { $0.confirmedAt == nil }.count
-        case .due: store.data.cards.filter { $0.confirmedAt != nil && ($0.dueAt ?? .distantPast) <= .now }.count
-        case .all: store.data.cards.count
+        case .drafts: store.data.cards.filter { $0.deletedAt == nil && $0.confirmedAt == nil }.count
+        case .due: store.data.cards.filter { $0.deletedAt == nil && $0.confirmedAt != nil && ($0.dueAt ?? .distantPast) <= .now }.count
+        case .all: store.data.cards.filter { $0.deletedAt == nil }.count
         }
     }
 
     private var emptyTitle: String {
-        section == .drafts ? "没有待确认草稿" : section == .due ? "今天没有到期卡片" : "还没有卡片"
+        if showingTrash { return "回收站为空" }
+        return section == .drafts ? "没有待确认草稿" : section == .due ? "今天没有到期卡片" : "还没有卡片"
     }
     private var emptyDescription: String {
-        section == .drafts ? "在听写中填写积累点并调用 AI 后，草稿会出现在这里。" :
+        if showingTrash { return "移入回收站的卡片会保留内容、来源和复习历史。" }
+        return section == .drafts ? "在听写中填写积累点并调用 AI 后，草稿会出现在这里。" :
             section == .due ? "FSRS 会在需要复习时把卡片放到这里。" : "卡片将在这里按分类保存。"
     }
 
 }
 
 private struct CardLibraryRow: View {
+    @EnvironmentObject private var store: StudyStore
     let card: StudyCard
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(card.category.rawValue)
-                    .font(AppType.ui(12, weight: .semibold))
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(.green.opacity(0.10), in: Capsule())
-                Text(statusText).font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+        GlassCard(accent: GlassTheme.violet) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    CardTagView(kind: .category(card.category), showsIcon: false)
+                    if let source = card.sources.first {
+                        CardTagView(kind: CardSourceResolver.kind(for: source, in: store.data).tagKind,
+                                    showsIcon: true)
+                    }
+                    Text(statusText).font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                }
+                Text(card.title ?? card.question)
+                    .font(AppType.ui(17, weight: .semibold))
+                    .multilineTextAlignment(.leading)
             }
-            Text(card.question).font(AppType.ui(17, weight: .semibold)).multilineTextAlignment(.leading)
         }
-        .padding(14)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.white.opacity(0.16)))
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var statusText: String {
+        if let deletedAt = card.deletedAt { return "已删除 \(deletedAt.formatted(date: .abbreviated, time: .shortened))" }
         if card.confirmedAt == nil { return "待确认" }
         if (card.dueAt ?? .distantPast) <= .now { return "待复习" }
         return "下次 \((card.dueAt ?? .now).formatted(date: .abbreviated, time: .shortened))"
@@ -141,21 +165,35 @@ private struct CardLibraryRow: View {
 }
 
 private struct CardDetailSheet: View {
+    private enum Layout {
+        static let small: CGFloat = 8
+        static let medium: CGFloat = 12
+        static let section: CGFloat = 16
+        static let large: CGFloat = 20
+    }
+
     @EnvironmentObject private var store: StudyStore
     let cardID: UUID
     let onClose: () -> Void
     @State private var feedback = ""
     @State private var working = false
+    @State private var isAuditingCards = false
     @State private var notice: String?
     @State private var answerVisible = false
-    @State private var shownSourceIndex: Int?
+    @State private var sourcesExpanded = false
+    @State private var aiPanelExpanded = false
+    @State private var editing = false
+    @State private var confirmingTrash = false
+    @State private var editTitle = ""
+    @State private var editQuestion = ""
+    @State private var editAnswer = ""
 
     private var card: StudyCard? { store.data.cards.first(where: { $0.id == cardID }) }
     private var isDue: Bool { card?.confirmedAt != nil && (card?.dueAt ?? .distantPast) <= .now }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: Layout.section) {
                 HStack {
                     Text(card?.confirmedAt == nil ? "检查卡片草稿" : isDue ? "复习卡片" : "学习卡片")
                         .font(AppType.ui(27, weight: .semibold))
@@ -164,30 +202,133 @@ private struct CardDetailSheet: View {
                 }
                 if let card {
                     metadata(card)
-                    cardFace(card)
+                    if editing { editForm(card) } else { cardFace(card) }
                     if !card.sources.isEmpty { sources(card) }
-                    if card.confirmedAt == nil { draftControls(card) }
-                    else if isDue && answerVisible { reviewControls(card) }
+                    if card.deletedAt != nil {
+                        Divider()
+                        HStack {
+                            Spacer()
+                            Button("恢复") { restore(card) }
+                                .buttonStyle(AppActionButtonStyle(prominent: true))
+                        }
+                    } else if !editing {
+                        if card.confirmedAt == nil {
+                            if aiPanelExpanded { aiRevisionPanel(card) }
+                            Divider()
+                            actionBar(card, includesConfirmation: true)
+                        } else {
+                            if aiPanelExpanded { aiRevisionPanel(card) }
+                            Divider()
+                            actionBar(card)
+                            if isDue && answerVisible { reviewControls(card) }
+                        }
+                    }
                     if let notice { Text(notice).font(AppType.ui(15, weight: .regular)).foregroundStyle(.secondary).textSelection(.enabled) }
                 } else {
                     ContentUnavailableView("卡片已不存在", systemImage: "rectangle.slash")
                 }
+
             }
-            .padding(28)
+            .padding(Layout.large)
         }
-        .frame(width: 720, height: 700)
+        .frame(width: 720)
+        .frame(maxHeight: 760)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.22)))
         .shadow(color: .black.opacity(0.3), radius: 26, y: 12)
+        .confirmationDialog("确定将这张卡片移到回收站吗？之后可以恢复。",
+                           isPresented: $confirmingTrash, titleVisibility: .visible) {
+            Button("移到回收站", role: .destructive) {
+                if let card { moveToTrash(card) }
+            }
+
+            Button("取消", role: .cancel) {}
+        }
+    }
+
+    private func actionBar(_ card: StudyCard, includesConfirmation: Bool = false) -> some View {
+        HStack(alignment: .center, spacing: Layout.small) {
+            HStack(spacing: Layout.small) {
+            Button("编辑") {
+                editTitle = card.title ?? card.question
+                editQuestion = card.question
+                editAnswer = card.answer
+                editing = true
+            }
+            .buttonStyle(AppActionButtonStyle())
+            Button {
+                withAnimation(GlassTheme.animation) { aiPanelExpanded.toggle() }
+            } label: {
+                Label("AI 整理", systemImage: "sparkles")
+            }
+                .buttonStyle(AppActionButtonStyle())
+                .disabled(working)
+            Menu {
+                Button("移到回收站", role: .destructive) { confirmingTrash = true }
+                    .disabled(working)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("更多管理操作")
+            }
+            if includesConfirmation {
+                Spacer(minLength: 24)
+                Button("确认并加入复习") { confirm() }
+                    .buttonStyle(AppActionButtonStyle(prominent: true))
+                    .disabled(working)
+            }
+        }
+    }
+
+    private func editForm(_ card: StudyCard) -> some View {
+        VStack(alignment: .leading, spacing: Layout.medium) {
+            Text("卡片名称").font(AppType.ui(15, weight: .semibold))
+            TextField("卡片名称", text: $editTitle)
+            Text("正面").font(AppType.ui(15, weight: .semibold))
+            TextEditor(text: $editQuestion).frame(minHeight: 80).studyInputChrome()
+            Text("背面").font(AppType.ui(15, weight: .semibold))
+            TextEditor(text: $editAnswer).frame(minHeight: 150).studyInputChrome()
+            HStack {
+                Button("取消") { editing = false }
+                Spacer()
+                Button("保存修改") { saveEditedCard(card) }
+                    .buttonStyle(AppActionButtonStyle(prominent: true))
+            }
+        }
+    }
+
+    private func saveEditedCard(_ card: StudyCard) {
+        do {
+            try store.updateCardContent(card.id, title: editTitle, question: editQuestion, answer: editAnswer)
+            editing = false
+            notice = "卡片修改已保存。"
+        } catch { notice = error.localizedDescription }
+    }
+
+    private func moveToTrash(_ card: StudyCard) {
+        do {
+            try store.moveCardToTrash(card.id)
+            onClose()
+        } catch { notice = error.localizedDescription }
+    }
+
+    private func restore(_ card: StudyCard) {
+        do {
+            try store.restoreCard(card.id)
+            onClose()
+        } catch { notice = error.localizedDescription }
     }
 
     private func metadata(_ card: StudyCard) -> some View {
-        HStack {
-            Text(card.category.rawValue)
-                .font(AppType.ui(12, weight: .semibold))
-                .padding(.horizontal, 9).padding(.vertical, 5)
-                .background(.white.opacity(0.12), in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.18)))
+        HStack(spacing: 8) {
+            CardTagView(kind: .category(card.category), showsIcon: false)
+            ForEach(sourceKinds(for: card), id: \.self) { source in
+                CardTagView(kind: source.tagKind)
+            }
             if card.sources.count > 1 {
                 Label("已合并 \(card.sources.count) 个来源", systemImage: "arrow.triangle.merge")
                     .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
@@ -199,10 +340,15 @@ private struct CardDetailSheet: View {
     }
 
     private func cardFace(_ card: StudyCard) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Layout.medium) {
             Text("正面")
                 .font(AppType.ui(12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.72))
+            if let title = card.title, !title.isEmpty {
+                Text(title)
+                    .font(AppType.ui(17, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
             Text(card.question)
                 .font(AppType.ui(23, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -239,34 +385,58 @@ private struct CardDetailSheet: View {
     }
 
     private func sources(_ card: StudyCard) -> some View {
-        GroupBox("来源 · \(card.sources.count)") {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(card.sources.enumerated()), id: \.offset) { index, source in
-                    Button {
-                        shownSourceIndex = index
-                    } label: {
-                        Label("查看原文 · \(sourceName(source))", systemImage: "link")
-                            .lineLimit(1)
-                    }
-                    .buttonStyle(.link)
-                    .help(String(sourceText(source).prefix(320)))
-                    .popover(isPresented: Binding(
-                        get: { shownSourceIndex == index },
-                        set: { if !$0 { shownSourceIndex = nil } }
-                    )) {
-                        ScrollView {
+        VStack(alignment: .leading, spacing: Layout.small) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("来源")
+                    .font(AppType.ui(12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if let source = card.sources.first {
+                    CardTagView(kind: CardSourceResolver.kind(for: source, in: store.data).tagKind)
+                    Text(sourceName(source))
+                        .font(AppType.ui(13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                if card.sources.count > 1 {
+                    Text("+\(card.sources.count - 1)")
+                        .font(AppType.ui(12, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 8)
+                Button(sourcesExpanded ? "收起来源" : "查看来源") {
+                    withAnimation(GlassTheme.animation) { sourcesExpanded.toggle() }
+                }
+                .buttonStyle(.link)
+                .font(AppType.ui(13, weight: .medium))
+            }
+            if sourcesExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(card.sources.enumerated()), id: \.offset) { _, source in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(sourceName(source))
+                                .font(AppType.ui(12, weight: .medium))
+                                .foregroundStyle(.tertiary)
                             Text(sourceText(source))
-                                .font(AppType.reading(16))
+                                .font(AppType.reading(15))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(3)
                                 .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(20)
                         }
-                        .frame(width: 460, height: 300)
                     }
                 }
+                .padding(10)
+                .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+    }
+
+    private func sourceKinds(for card: StudyCard) -> [CardSourceKind] {
+        var seen = Set<CardSourceKind>()
+        return card.sources.compactMap { source in
+            let kind = CardSourceResolver.kind(for: source, in: store.data)
+            return seen.insert(kind).inserted ? kind : nil
         }
     }
 
@@ -297,21 +467,24 @@ private struct CardDetailSheet: View {
         return "来源资料已缺失"
     }
 
-    private func draftControls(_ card: StudyCard) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("修改意见").font(AppType.ui(17, weight: .semibold))
-            TextField("例如：增加例句；解释得更具体；突出动词本质含义", text: $feedback, axis: .vertical)
+    private func aiRevisionPanel(_ card: StudyCard) -> some View {
+        VStack(alignment: .leading, spacing: Layout.small) {
+            Text("修改意见")
+                .font(AppType.ui(14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField("例如：增加例句；解释得更具体；突出动词本质含义", text: $feedback)
                 .textFieldStyle(.roundedBorder)
-            HStack {
+            HStack(spacing: 10) {
                 Button("按意见修订") { revise(card) }
                     .disabled(feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || working)
-                Spacer()
-                if working { ProgressView().controlSize(.small) }
-                Button("确认并加入复习") { confirm() }
-                    .buttonStyle(AppActionButtonStyle(prominent: true))
+                Button("自动整理") { reAudit(card) }
                     .disabled(working)
+                if working { ProgressView().controlSize(.small) }
             }
+            .font(AppType.ui(13, weight: .medium))
         }
+        .padding(.top, 4)
+        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     private func reviewControls(_ card: StudyCard) -> some View {
@@ -363,11 +536,47 @@ private struct CardDetailSheet: View {
                 let result = try await AIStudyService.reviseCard(question: card.question, answer: card.answer,
                                                                  category: card.category, feedback: instruction,
                                                                  sourceQuote: card.sources.first?.quote, apiKey: key)
+                isAuditingCards = true
+                notice = "正在整理修订后的卡片…"
+                let draft = CardDraft(category: result.category, mergeKey: card.mergeKey ?? "",
+                                      question: result.question, answer: result.answer)
+                let audited = await CardAuditService.auditOrFallback(draft, apiKey: key)
                 try store.updateCardDraft(card.id, category: result.category,
-                                          question: result.question, answer: result.answer)
+                                          question: audited.question, answer: audited.answer,
+                                          title: audited.title)
                 feedback = ""
-                notice = "已显示修改后的完整卡片，请检查后再确认。"
+                notice = audited.usedFallback
+                    ? "AI 卡片整理失败，当前显示基础整理版本，可重试。"
+                    : "已显示修改后的完整卡片，请检查后再确认。"
             } catch { notice = error.localizedDescription }
+            isAuditingCards = false
+            working = false
+        }
+    }
+
+    private func reAudit(_ card: StudyCard) {
+        let key: String
+        do { key = try AIProviderSettings.textKey() ?? "" }
+        catch { notice = error.localizedDescription; return }
+        guard !key.isEmpty else { notice = AIProviderError.missingKey.localizedDescription; return }
+        working = true
+        isAuditingCards = true
+        notice = "正在重新整理卡片…"
+        let draft = CardDraft(category: card.category, mergeKey: card.mergeKey ?? "",
+                              question: card.question, answer: card.answer)
+        Task {
+            let audited = await CardAuditService.auditOrFallback(draft, apiKey: key)
+            do {
+                try store.updateCardDraft(card.id, category: card.category,
+                                          question: audited.question, answer: audited.answer,
+                                          title: audited.title)
+                notice = audited.usedFallback
+                    ? "AI 卡片整理失败，当前显示基础整理版本，可重试。"
+                    : "卡片已重新整理，请检查后确认。"
+            } catch {
+                notice = error.localizedDescription
+            }
+            isAuditingCards = false
             working = false
         }
     }
@@ -391,4 +600,3 @@ private struct CardDetailSheet: View {
         working = false
     }
 }
-

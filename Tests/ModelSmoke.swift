@@ -26,6 +26,68 @@ struct ModelSmoke {
         let restored = try decoder.decode(StudyDatabase.self, from: payload)
         precondition(restored.articles.first?.id == articleID)
         precondition(restored.readingRecords.first?.chunkID == chunkID)
+        let phraseDraft = CardDraft(category: .expression,
+                                    mergeKey: "表达|tener ganas de + infinitivo|愿望",
+                                    question: "  这个结构怎么表达？\n\n",
+                                    answer: "```text\n**表示很想做某事**\n\n**表示很想做某事**\n```")
+        let normalizedPhrase = CardContentNormalizer.normalize(phraseDraft)
+        precondition(normalizedPhrase.question == "这个结构怎么表达？")
+        precondition(!normalizedPhrase.answer.contains("```") && !normalizedPhrase.answer.contains("**"))
+        precondition(CardContentNormalizer.title(for: phraseDraft) == "tener ganas de + infinitivo")
+        precondition(CardContentNormalizer.title(for: CardDraft(category: .vocabulary,
+                                                                mergeKey: "词汇|aprovechar|利用",
+                                                                question: "什么意思？", answer: "利用")) == "aprovechar")
+        assertStrictObjectsHaveMatchingRequiredProperties(CardAuditService.schema)
+        let auditDraft = CardDraft(category: .expression,
+                                   mergeKey: "表达|tener muchas ganas de + infinitivo|愿望",
+                                   question: "这是什么结构？", answer: "表示很想做某事。")
+        let success = await CardAuditService.auditOrFallback(auditDraft, apiKey: "test") { draft in
+            CardAuditResult(title: "tener ganas de + infinitivo",
+                            question: draft.question,
+                            answer: "整理后的答案")
+        }
+        precondition(!success.usedFallback && success.answer == "整理后的答案",
+                     "Successful audit must replace the normalized draft")
+        let networkFailure = await CardAuditService.auditOrFallback(auditDraft, apiKey: "test") { _ in
+            throw AIStudyError.server(503, "offline")
+        }
+        precondition(networkFailure.usedFallback && networkFailure.question == "这是什么结构？",
+                     "Network failure must preserve the normalized draft")
+        let schemaFailure = await CardAuditService.auditOrFallback(auditDraft, apiKey: "test") { _ in
+            throw AIStudyError.invalidResponse
+        }
+        precondition(schemaFailure.usedFallback && !schemaFailure.answer.isEmpty,
+                     "Schema failure must preserve the normalized draft")
+        let retry = await CardAuditService.auditOrFallback(
+            CardDraft(category: .grammar, mergeKey: "语法|haber estado + gerundio|持续",
+                      question: "如何表达持续？", answer: "基础答案"),
+            apiKey: "test"
+        ) { _ in
+            CardAuditResult(title: "haber estado + gerundio",
+                            question: "如何表达持续？", answer: "审核后的答案")
+        }
+        precondition(!retry.usedFallback && retry.title == "haber estado + gerundio",
+                     "A successful retry must provide the audited result")
+        let batch = await withTaskGroup(of: CardAuditDecision.self, returning: [CardAuditDecision].self) { group in
+            for index in 0..<3 {
+                group.addTask {
+                    await CardAuditService.auditOrFallback(
+                        CardDraft(category: .expression, mergeKey: "表达|point\(index)|test",
+                                  question: "问题 \(index)", answer: "答案 \(index)"),
+                        apiKey: "test"
+                    ) { draft in
+                        if index == 1 { throw AIStudyError.invalidResponse }
+                        return CardAuditResult(title: "point\(index)",
+                                               question: draft.question, answer: "审核答案 \(index)")
+                    }
+                }
+            }
+            var results: [CardAuditDecision] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+        precondition(batch.count == 3 && batch.filter(\.usedFallback).count == 1,
+                     "A partial batch failure must preserve all three cards")
         let testDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("SpanishLearningStoreTest-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: testDirectory) }
         let firstStore = StudyStore(baseDirectory: testDirectory)
@@ -120,6 +182,8 @@ struct ModelSmoke {
         assertStrictObjectsHaveMatchingRequiredProperties(cardsSchema)
         let writingHintSchema = WritingAIService.writingHintSchema
         assertStrictObjectsHaveMatchingRequiredProperties(writingHintSchema)
+        let writingFeedbackPresentationSchema = WritingAIService.writingFeedbackPresentationSchema
+        assertStrictObjectsHaveMatchingRequiredProperties(writingFeedbackPresentationSchema)
         let writingHintJSON = """
         {"expressionIdeas":["可以考虑使用一个表示持续的时态结构。","先写主句，再补充原因。"],"cautions":["注意动词后面的形式。"]}
         """
@@ -130,6 +194,29 @@ struct ModelSmoke {
             from: Data(#"{"expressionIdeas":[],"cautions":[]}"#.utf8)
         )
         precondition(emptyWritingHint.expressionIdeas.isEmpty && emptyWritingHint.cautions.isEmpty)
+        let presentationJSON = """
+        {"summary":"原始反馈中的总体说明。","issues":[{"title":"原因表达","explanation":"这里需要使用原因结构。","example":"Con tanta lluvia..."}],"recommendedExpression":"Con tanta lluvia, ha estado lloviendo muchísimo.","improvements":[]}
+        """
+        let presentation = try decoder.decode(
+            WritingFeedbackPresentation.self,
+            from: Data(presentationJSON.utf8)
+        )
+        precondition(presentation.issues.count == 1 &&
+                     presentation.issues[0].example == "Con tanta lluvia..." &&
+                     presentation.improvements.isEmpty)
+        let emptyPresentation = try decoder.decode(
+            WritingFeedbackPresentation.self,
+            from: Data(#"{"summary":null,"issues":[],"recommendedExpression":null,"improvements":[]}"#.utf8)
+        )
+        precondition(emptyPresentation.summary == nil &&
+                     emptyPresentation.recommendedExpression == nil &&
+                     emptyPresentation.issues.isEmpty &&
+                     emptyPresentation.improvements.isEmpty)
+        let originalFeedback = "原始反馈不得被 formatter 改写。"
+        let originalCorrected = "Aunque se parecen."
+        precondition(originalFeedback == "原始反馈不得被 formatter 改写。" &&
+                     originalCorrected == "Aunque se parecen.",
+                     "Presentation formatting must not mutate saved writing content")
         let analysisCategories = (((listeningSchema["properties"] as! [String: Any])["items"] as! [String: Any])["items"] as! [String: Any])["properties"] as! [String: Any]
         let categoryValues = ((analysisCategories["category"] as! [String: Any])["enum"] as! [String])
         precondition(!categoryValues.contains("expression") && !categoryValues.contains("vocabulary"))
@@ -345,6 +432,34 @@ struct ModelSmoke {
         let migratedCorrection = migrated.data.cards.first { $0.category == .correction }
         precondition(migratedCorrection?.sources.count == 2,
                      "Writing correction card lost its version sources during migration")
+
+        let managedCardID = firstStore.data.cards.first!.id
+        let managedReviewCount = firstStore.data.reviewEvents.count
+        let managedFSRS = firstStore.data.cards.first!.fsrsState
+        try firstStore.moveCardToTrash(managedCardID)
+        precondition(firstStore.data.cards.first(where: { $0.id == managedCardID })?.deletedAt != nil)
+        precondition(firstStore.data.cards.filter { $0.deletedAt == nil && $0.confirmedAt != nil }.allSatisfy { $0.id != managedCardID })
+        do {
+            try firstStore.reviewCard(managedCardID, grade: .good)
+            preconditionFailure("Trashed card entered review scheduling")
+        } catch StoreError.unconfirmedCard { }
+        try firstStore.restoreCard(managedCardID)
+        precondition(firstStore.data.cards.first(where: { $0.id == managedCardID })?.deletedAt == nil)
+        precondition(firstStore.data.cards.first(where: { $0.id == managedCardID })?.fsrsState?.reps == managedFSRS?.reps &&
+                     firstStore.data.reviewEvents.count == managedReviewCount,
+                     "Restore changed review state or history")
+        let reopenedTrashState = StudyStore(baseDirectory: testDirectory).data.cards.first(where: { $0.id == managedCardID })
+        precondition(reopenedTrashState?.deletedAt == nil, "Restored trash state did not persist")
+        if let editable = firstStore.data.cards.first(where: { $0.confirmedAt == nil }) {
+            let editID = editable.id
+            let editFSRS = editable.fsrsState?.reps
+            try firstStore.updateCardContent(editID, title: "手动标题",
+                                             question: "手动正面", answer: "手动背面")
+            let edited = firstStore.data.cards.first(where: { $0.id == editID })
+            precondition(edited?.id == editID && edited?.title == "手动标题" &&
+                         edited?.question == "手动正面" && edited?.fsrsState?.reps == editFSRS,
+                         "Manual content editing changed identity or FSRS")
+        }
         let recoveredAudio = try Data(contentsOf: migrated.audioURL(for: migrated.data.audioMaterials[0]))
         precondition(recoveredAudio == audioPayload)
 

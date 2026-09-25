@@ -11,6 +11,7 @@ struct ReadingView: View {
     @State private var newText = ""
     @State private var status: String?
     @State private var working = false
+    @State private var isAuditingCards = false
 
     private let ink = Color(red: 0.91, green: 0.89, blue: 0.95)
     private let secondaryInk = Color(red: 0.78, green: 0.75, blue: 0.84)
@@ -402,11 +403,33 @@ struct ReadingView: View {
                                                                       chunkText: chunk.text,
                                                                       discussion: discussion,
                                                                       apiKey: key)
+                isAuditingCards = true
+                status = "正在整理卡片…"
+                var auditedCards: [ReadingCardsResult.Card] = []
+                var fallbackCount = 0
+                for card in result.cards {
+                    guard card.create else {
+                        auditedCards.append(card)
+                        continue
+                    }
+                    let draft = CardDraft(category: card.category, mergeKey: card.mergeKey,
+                                          question: card.question, answer: card.answer)
+                    let audited = await CardAuditService.auditOrFallback(draft, apiKey: key)
+                    if audited.usedFallback { fallbackCount += 1 }
+                    auditedCards.append(.init(discussionID: card.discussionID, create: true,
+                                              category: card.category, mergeKey: card.mergeKey,
+                                              title: audited.title, question: audited.question,
+                                              answer: audited.answer))
+                }
+                let auditedResult = ReadingCardsResult(cards: auditedCards)
                 try store.completeReadingWithCards(articleID: article.id, chunkID: chunk.id,
-                                                   difficulty: difficulty, note: note, result: result)
+                                                   difficulty: difficulty, note: note, result: auditedResult)
                 let count = result.cards.filter(\.create).count
-                status = "本段阅读已完成，新增整理 \(count) 个卡片要点。"
+                status = fallbackCount == 0
+                    ? "本段阅读已完成，新增整理 \(count) 个卡片要点。"
+                    : "本段阅读已完成，新增整理 \(count) 个卡片要点。\(fallbackCount) 张使用基础整理版本；可在卡片详情中重新整理。"
             } catch { status = error.localizedDescription }
+            isAuditingCards = false
             working = false
         }
     }
@@ -461,46 +484,49 @@ struct ReadingHistoryView: View {
                 StudyEmptyState(title: "还没有阅读记录", message: "完成一段精读后，文章和提问会出现在这里。",
                                 symbol: "books.vertical")
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ForEach(store.data.articles.filter { filterID == nil || $0.id == filterID }) { article in
-                            let records = store.data.readingRecords.filter { $0.articleID == article.id }
-                            if !records.isEmpty {
-                                GroupBox(article.title) {
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        Text("\(Set(records.map(\.chunkID)).count) 段已读 · \(records.count) 次精读")
-                                            .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                                        ForEach(records.reversed()) { record in
-                                            Divider()
-                                            VStack(alignment: .leading, spacing: 7) {
-                                                HStack {
-                                                    Text("第 \((article.chunks.first(where: { $0.id == record.chunkID })?.ordinal) ?? 1) 段 · \(record.difficulty.rawValue)")
-                                                        .font(AppType.ui(17, weight: .semibold))
-                                                    Spacer()
-                                                    Button("回到文章") {
-                                                        selectedArticleID = article.id
-                                                        selectedScreen = .reading
+                HistoryPanel {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(store.data.articles.filter { filterID == nil || $0.id == filterID }) { article in
+                                let records = store.data.readingRecords.filter { $0.articleID == article.id }
+                                if !records.isEmpty {
+                                    GroupBox(article.title) {
+                                        VStack(alignment: .leading, spacing: 12) {
+                                            Text("\(Set(records.map(\.chunkID)).count) 段已读 · \(records.count) 次精读")
+                                                .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                                            ForEach(records.reversed()) { record in
+                                                VStack(alignment: .leading, spacing: 7) {
+                                                    HStack {
+                                                        Text("第 \((article.chunks.first(where: { $0.id == record.chunkID })?.ordinal) ?? 1) 段 · \(record.difficulty.rawValue)")
+                                                            .font(AppType.ui(17, weight: .semibold))
+                                                        Spacer()
+                                                        Button("回到文章") {
+                                                            selectedArticleID = article.id
+                                                            selectedScreen = .reading
+                                                        }
                                                     }
-                                                }
-                                                Text(record.completedAt.formatted(date: .abbreviated, time: .shortened))
-                                                    .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                                                if !record.questions.isEmpty {
-                                                    Text("精读问题：\(record.questions.joined(separator: "；"))")
-                                                        .font(AppType.ui(14, weight: .regular))
-                                                }
-                                                if let cardIDs = record.cardIDs, !cardIDs.isEmpty {
-                                                    Label("已关联 \(cardIDs.count) 张卡片草稿", systemImage: "rectangle.on.rectangle")
+                                                    Text(record.completedAt.formatted(date: .abbreviated, time: .shortened))
                                                         .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                                                    if !record.questions.isEmpty {
+                                                        Text("精读问题：\(record.questions.joined(separator: "；"))")
+                                                            .font(AppType.ui(14, weight: .regular))
+                                                    }
+                                                    if let cardIDs = record.cardIDs, !cardIDs.isEmpty {
+                                                        Label("已关联 \(cardIDs.count) 张卡片草稿", systemImage: "rectangle.on.rectangle")
+                                                            .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                                                    }
+                                                    if !record.note.isEmpty { Text(record.note).foregroundStyle(.secondary) }
                                                 }
-                                                if !record.note.isEmpty { Text(record.note).foregroundStyle(.secondary) }
+                                                .historyEntryChrome()
                                             }
                                         }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                             }
                         }
                     }
+                    .scrollContentBackground(.hidden)
                 }
             }
             Spacer(minLength: 0)
@@ -508,4 +534,3 @@ struct ReadingHistoryView: View {
         .padding(32)
     }
 }
-

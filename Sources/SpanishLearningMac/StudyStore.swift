@@ -310,7 +310,8 @@ final class StudyStore: ObservableObject {
         // A regenerated sentence may have unconfirmed drafts from an earlier run.
         // Detach only this sentence's source; cards shared with other sources survive.
         let oldDraftIDs = Set((priorSentence.learningPoints ?? []).map(\.cardID))
-        for index in data.cards.indices.reversed() where oldDraftIDs.contains(data.cards[index].id) && data.cards[index].confirmedAt == nil {
+        for index in data.cards.indices.reversed() where oldDraftIDs.contains(data.cards[index].id) &&
+                data.cards[index].deletedAt == nil && data.cards[index].confirmedAt == nil {
             data.cards[index].sources.removeAll { $0.materialID == materialID && $0.segmentID == sentenceID }
             if data.cards[index].sources.isEmpty { data.cards.remove(at: index) }
         }
@@ -323,7 +324,7 @@ final class StudyStore: ObservableObject {
                                          quote: priorSentence.transcript)
             let cardID: UUID
             if let existing = data.cards.firstIndex(where: {
-                $0.category == generated.category &&
+                $0.deletedAt == nil && $0.category == generated.category &&
                 Self.normalizedMergeKey($0.mergeKey ?? "") == key && !key.isEmpty
             }) {
                 cardID = data.cards[existing].id
@@ -334,8 +335,12 @@ final class StudyStore: ObservableObject {
                 data.cards[existing].updatedAt = .now
             } else {
                 cardID = UUID()
+                let draft = CardContentNormalizer.normalize(CardDraft(
+                    category: generated.category, mergeKey: key,
+                    question: generated.question, answer: generated.answer))
                 data.cards.append(StudyCard(id: cardID, category: generated.category,
-                                            question: generated.question, answer: generated.answer,
+                                            title: CardContentNormalizer.title(for: draft, auditedTitle: generated.title),
+                                            question: draft.question, answer: draft.answer,
                                             sources: [source], confirmedAt: nil, dueAt: nil,
                                             fsrsState: nil, createdAt: .now, updatedAt: .now,
                                             revisionCount: 0, mergeKey: key))
@@ -367,10 +372,11 @@ final class StudyStore: ObservableObject {
             .lowercased()
     }
 
-    func updateCardDraft(_ cardID: UUID, category: CardCategory, question: String, answer: String) throws {
+    func updateCardDraft(_ cardID: UUID, category: CardCategory, question: String, answer: String,
+                         title: String? = nil) throws {
         guard canWrite else { throw StoreError.readOnly }
         guard let index = data.cards.firstIndex(where: { $0.id == cardID }) else { throw StoreError.missingCard }
-        guard data.cards[index].confirmedAt == nil else { throw StoreError.cardConfirmed }
+        guard data.cards[index].confirmedAt == nil, data.cards[index].deletedAt == nil else { throw StoreError.cardConfirmed }
         let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanQuestion.isEmpty, !cleanAnswer.isEmpty else { throw StoreError.emptyCard }
@@ -378,6 +384,9 @@ final class StudyStore: ObservableObject {
         data.cards[index].category = category
         data.cards[index].question = cleanQuestion
         data.cards[index].answer = cleanAnswer
+        let draft = CardDraft(category: category, mergeKey: data.cards[index].mergeKey ?? "",
+                              question: cleanQuestion, answer: cleanAnswer)
+        data.cards[index].title = CardContentNormalizer.title(for: draft, auditedTitle: title)
         data.cards[index].updatedAt = .now
         data.cards[index].revisionCount = (data.cards[index].revisionCount ?? 0) + 1
         do { try save() } catch { data.cards[index] = previous; throw error }
@@ -393,11 +402,49 @@ final class StudyStore: ObservableObject {
         do { try save() } catch { data.cards[index] = previous; throw error }
     }
 
+    func updateCardContent(_ cardID: UUID, title: String, question: String, answer: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }),
+              data.cards[index].deletedAt == nil else { throw StoreError.missingCard }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let draft = CardContentNormalizer.normalize(CardDraft(
+            category: data.cards[index].category, mergeKey: data.cards[index].mergeKey ?? "",
+            question: question, answer: answer))
+        guard !cleanTitle.isEmpty, !draft.question.isEmpty, !draft.answer.isEmpty else { throw StoreError.emptyCard }
+        let previous = data.cards[index]
+        data.cards[index].title = cleanTitle
+        data.cards[index].question = draft.question
+        data.cards[index].answer = draft.answer
+        data.cards[index].updatedAt = .now
+        data.cards[index].revisionCount = (data.cards[index].revisionCount ?? 0) + 1
+        do { try save() } catch { data.cards[index] = previous; throw error }
+    }
+
+    func moveCardToTrash(_ cardID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }),
+              data.cards[index].deletedAt == nil else { throw StoreError.missingCard }
+        let previous = data.cards[index]
+        data.cards[index].deletedAt = .now
+        data.cards[index].updatedAt = .now
+        do { try save() } catch { data.cards[index] = previous; throw error }
+    }
+
+    func restoreCard(_ cardID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }),
+              data.cards[index].deletedAt != nil else { throw StoreError.missingCard }
+        let previous = data.cards[index]
+        data.cards[index].deletedAt = nil
+        data.cards[index].updatedAt = .now
+        do { try save() } catch { data.cards[index] = previous; throw error }
+    }
+
     func reviewCard(_ cardID: UUID, grade: ReviewGrade, now: Date = .now) throws {
         guard canWrite else { throw StoreError.readOnly }
         guard !transferInProgress else { throw BackupError.busy }
         guard let index = data.cards.firstIndex(where: { $0.id == cardID }) else { throw StoreError.missingCard }
-        guard data.cards[index].confirmedAt != nil else { throw StoreError.unconfirmedCard }
+        guard data.cards[index].confirmedAt != nil, data.cards[index].deletedAt == nil else { throw StoreError.unconfirmedCard }
         let priorCard = data.cards[index]
         let result = try LocalFSRSScheduler.schedule(card: priorCard, grade: grade, now: now)
         let event = ReviewEvent(id: UUID(), cardID: cardID, reviewedAt: now,
@@ -476,7 +523,8 @@ final class StudyStore: ObservableObject {
             if !key.isEmpty, !question.isEmpty, !answer.isEmpty {
                 let source = SourceReference(materialID: exerciseID, segmentID: versionID, quote: spanish)
                 if let existing = data.cards.firstIndex(where: {
-                    $0.category == .correction && Self.normalizedMergeKey($0.mergeKey ?? "") == key
+                    $0.deletedAt == nil && $0.category == .correction &&
+                    Self.normalizedMergeKey($0.mergeKey ?? "") == key
                 }) {
                     correctionCardID = data.cards[existing].id
                     if !data.cards[existing].sources.contains(where: {
@@ -488,8 +536,11 @@ final class StudyStore: ObservableObject {
                 } else {
                     let id = UUID()
                     correctionCardID = id
+                    let draft = CardContentNormalizer.normalize(CardDraft(
+                        category: .correction, mergeKey: key, question: question, answer: answer))
                     data.cards.append(StudyCard(id: id, category: .correction,
-                                                question: question, answer: answer,
+                                                title: CardContentNormalizer.title(for: draft, auditedTitle: result.card.title),
+                                                question: draft.question, answer: draft.answer,
                                                 sources: [source], confirmedAt: nil,
                                                 dueAt: nil, fsrsState: nil,
                                                 createdAt: submittedAt, updatedAt: submittedAt,
@@ -584,7 +635,8 @@ final class StudyStore: ObservableObject {
                                              quote: data.articles[articleIndex].chunks[chunkIndex].text)
                 let cardID: UUID
                 if let existing = data.cards.firstIndex(where: {
-                    $0.category == generated.category && Self.normalizedMergeKey($0.mergeKey ?? "") == key
+                    $0.deletedAt == nil && $0.category == generated.category &&
+                    Self.normalizedMergeKey($0.mergeKey ?? "") == key
                 }) {
                     cardID = data.cards[existing].id
                     if !data.cards[existing].sources.contains(where: {
@@ -595,8 +647,12 @@ final class StudyStore: ObservableObject {
                     data.cards[existing].updatedAt = completedAt
                 } else {
                     cardID = UUID()
+                    let draft = CardContentNormalizer.normalize(CardDraft(
+                        category: generated.category, mergeKey: key,
+                        question: question, answer: answer))
                     data.cards.append(StudyCard(id: cardID, category: generated.category,
-                                                question: question, answer: answer,
+                                                title: CardContentNormalizer.title(for: draft, auditedTitle: generated.title),
+                                                question: draft.question, answer: draft.answer,
                                                 sources: [source], confirmedAt: nil,
                                                 dueAt: nil, fsrsState: nil,
                                                 createdAt: completedAt, updatedAt: completedAt,

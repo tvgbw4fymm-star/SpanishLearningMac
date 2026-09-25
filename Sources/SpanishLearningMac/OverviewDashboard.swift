@@ -15,8 +15,8 @@ private struct OverviewStats {
         }
     }
     var writingWords: Int { database.writingExercises.flatMap(\.versions).reduce(0) { $0 + words($1.spanishText) } }
-    var confirmedCards: Int { database.cards.filter { $0.confirmedAt != nil }.count }
-    var dueCards: Int { database.cards.filter { $0.confirmedAt != nil && ($0.dueAt ?? .distantPast) <= .now }.count }
+    var confirmedCards: Int { database.cards.filter { $0.deletedAt == nil && $0.confirmedAt != nil }.count }
+    var dueCards: Int { database.cards.filter { $0.deletedAt == nil && $0.confirmedAt != nil && ($0.dueAt ?? .distantPast) <= .now }.count }
     var todaySentences: Int { Set(database.dictationAttempts.filter { isToday($0.submittedAt) }.map(\.sentenceID)).count }
     var todayArticles: Int { Set(database.readingRecords.filter { isToday($0.completedAt) }.map(\.articleID)).count }
     var todayReadingWords: Int {
@@ -344,4 +344,3 @@ private struct OverviewMetricCard: View {
         .accessibilityLabel("\(title)，\(value)，\(note)")
     }
 }
-

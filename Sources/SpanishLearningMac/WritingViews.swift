@@ -44,6 +44,7 @@ struct WritingView: View {
     @State private var learnerSpanish = ""
     @State private var feedback: WritingFeedbackDisplay?
     @State private var working = false
+    @State private var isAuditingCards = false
     @State private var notice: String?
     @State private var chineseReview: ChineseDraftReviewResult?
     @State private var reviewedChinese = ""
@@ -514,6 +515,25 @@ struct WritingView: View {
                                                                      sourceSpanish: source?.text,
                                                                      learnerSpanish: spanish,
                                                                      mode: mode, apiKey: key)
+                var audited = evaluated
+                var usedCardFallback = false
+                if evaluated.card.create {
+                    isAuditingCards = true
+                    notice = "正在整理纠错卡片…"
+                    let draft = CardDraft(category: .correction, mergeKey: evaluated.card.mergeKey,
+                                          question: evaluated.card.question, answer: evaluated.card.answer)
+                    let result = await CardAuditService.auditOrFallback(draft, apiKey: key)
+                    usedCardFallback = result.usedFallback
+                    audited = WritingFeedbackResult(
+                        feedback: evaluated.feedback, correctedSpanish: evaluated.correctedSpanish,
+                        scores: evaluated.scores, errors: evaluated.errors,
+                        card: .init(create: true, mergeKey: evaluated.card.mergeKey,
+                                    title: result.title, question: result.question, answer: result.answer))
+                    notice = result.usedFallback
+                        ? "AI 卡片整理失败，当前显示基础整理版本，可重试。"
+                        : "正在保存反馈…"
+                    isAuditingCards = false
+                }
                 let saved = try store.saveWritingFeedback(exerciseID: selectedExerciseID,
                                                            mode: mode,
                                                            sourceID: source?.materialID,
@@ -523,20 +543,23 @@ struct WritingView: View {
                                                            referenceSpanish: mode == .material ? referenceSpanish : nil,
                                                            focus: focus.isEmpty ? nil : focus,
                                                            learnerSpanish: spanish,
-                                                           result: evaluated)
+                                                           result: audited)
                 selectedExerciseID = saved.exerciseID
-                feedback = WritingFeedbackDisplay(feedback: evaluated.feedback,
-                                                  correctedSpanish: evaluated.correctedSpanish,
-                                                  meaning: evaluated.scores.meaning,
-                                                  grammar: evaluated.scores.grammar,
-                                                  wording: evaluated.scores.wording,
-                                                  naturalness: evaluated.scores.naturalness,
-                                                  errors: evaluated.errors.map {
+                feedback = WritingFeedbackDisplay(feedback: audited.feedback,
+                                                  correctedSpanish: audited.correctedSpanish,
+                                                  meaning: audited.scores.meaning,
+                                                  grammar: audited.scores.grammar,
+                                                  wording: audited.scores.wording,
+                                                  naturalness: audited.scores.naturalness,
+                                                  errors: audited.errors.map {
                     WritingError(id: UUID(), original: $0.original,
                                  correction: $0.correction, explanation: $0.explanation)
                 }, createdCard: saved.cardID != nil)
-                notice = saved.cardID == nil ? "反馈和本次版本已保存。" : "反馈已保存，并生成了待确认的纠错卡片。"
+                notice = usedCardFallback
+                    ? "反馈已保存；AI 卡片整理失败，当前使用基础整理版本，可在卡片详情中重试。"
+                    : (saved.cardID == nil ? "反馈和本次版本已保存。" : "反馈已保存，并生成了待确认的纠错卡片。")
             } catch { notice = error.localizedDescription }
+            isAuditingCards = false
             working = false
         }
     }
@@ -587,6 +610,10 @@ struct WritingHistoryView: View {
     @Binding var selectedExerciseID: UUID?
     @Binding var selectedScreen: StudyScreen?
     @State private var selectedDate = "all"
+    @State private var expandedVersionIDs = Set<UUID>()
+    @State private var formattingCache: [UUID: WritingFeedbackPresentation] = [:]
+    @State private var formattingLoadingIDs = Set<UUID>()
+    @State private var formattingFailureIDs = Set<UUID>()
 
     private var dates: [String] {
         Array(Set(store.data.writingExercises.flatMap(\.versions).map { writingDayKey($0.submittedAt) })).sorted(by: >)
@@ -620,25 +647,67 @@ struct WritingHistoryView: View {
                                 message: "完成第一次翻译或自由表达后，记录会按日期出现在这里。",
                                 symbol: "square.and.pencil")
             } else {
-                List(exercises) { exercise in
-                    WritingHistoryBlock(exercise: exercise,
-                                        versions: visibleVersions(exercise),
-                                        sourceTitle: sourceTitle(exercise)) {
-                        selectedExerciseID = exercise.id
-                        selectedScreen = .writing
+                HistoryPanel {
+                    List(exercises) { exercise in
+                        WritingHistoryBlock(exercise: exercise,
+                                            versions: visibleVersions(exercise),
+                                            sourceTitle: sourceTitle(exercise),
+                                            continueAction: {
+                                                selectedExerciseID = exercise.id
+                                                selectedScreen = .writing
+                                            },
+                                            expandedVersionIDs: $expandedVersionIDs,
+                                            presentation: { formattingCache[ $0.id ] },
+                                            isFormatting: { formattingLoadingIDs.contains($0.id) },
+                                            formattingFailed: { formattingFailureIDs.contains($0.id) },
+                                            requestFormatting: { version in
+                                                requestFormatting(for: version, exercise: exercise)
+                                            })
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
-                    .listRowSeparator(.hidden)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
                 }
-                .listStyle(.inset)
             }
         }
         .padding(32)
+        .onChange(of: selectedDate) { _, _ in
+            expandedVersionIDs.removeAll()
+        }
     }
 
     private var visibleVersionCount: Int { exercises.reduce(0) { $0 + visibleVersions($1).count } }
     private func visibleVersions(_ exercise: WritingExercise) -> [WritingVersion] {
         exercise.versions.filter { selectedDate == "all" || writingDayKey($0.submittedAt) == selectedDate }
             .sorted { $0.submittedAt > $1.submittedAt }
+    }
+
+    private func requestFormatting(for version: WritingVersion, exercise: WritingExercise) {
+        guard !formattingLoadingIDs.contains(version.id) else { return }
+        formattingLoadingIDs.insert(version.id)
+        formattingFailureIDs.remove(version.id)
+        Task {
+            do {
+                let key = try AIProviderSettings.textKey() ?? ""
+                guard !key.isEmpty else { throw AIProviderError.missingKey }
+                let result = try await WritingAIService.formatWritingFeedback(
+                    chinesePrompt: exercise.chinesePrompt,
+                    learnerSpanish: version.spanishText,
+                    scores: (version.meaningScore ?? 0, version.grammarScore ?? 0,
+                             version.wordingScore ?? 0, version.naturalnessScore ?? 0),
+                    feedback: version.feedback,
+                    correctedSpanish: version.correctedSpanish,
+                    errors: version.errors,
+                    apiKey: key)
+                formattingCache[version.id] = result
+            } catch {
+                formattingCache[version.id] = WritingFeedbackDetailView.fallbackPresentation(for: version)
+                formattingFailureIDs.insert(version.id)
+            }
+            formattingLoadingIDs.remove(version.id)
+        }
     }
     private func sourceTitle(_ exercise: WritingExercise) -> String {
         guard let id = exercise.sourceID else { return "自由表达" }
@@ -659,6 +728,11 @@ private struct WritingHistoryBlock: View {
     let versions: [WritingVersion]
     let sourceTitle: String
     let continueAction: () -> Void
+    @Binding var expandedVersionIDs: Set<UUID>
+    let presentation: (WritingVersion) -> WritingFeedbackPresentation?
+    let isFormatting: (WritingVersion) -> Bool
+    let formattingFailed: (WritingVersion) -> Bool
+    let requestFormatting: (WritingVersion) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -672,30 +746,346 @@ private struct WritingHistoryBlock: View {
                 Button("继续修改") { continueAction() }.buttonStyle(AppActionButtonStyle())
             }
             ForEach(versions) { version in
-                Divider()
                 VStack(alignment: .leading, spacing: 9) {
-                    Text("第 \(exercise.versions.firstIndex(where: { $0.id == version.id }).map { $0 + 1 } ?? 1) 稿 · \(version.submittedAt.formatted(date: .abbreviated, time: .shortened))")
+                    HStack {
+                        Text("第 \(exercise.versions.firstIndex(where: { $0.id == version.id }).map { $0 + 1 } ?? 1) 稿 · \(version.submittedAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                        Spacer()
+                    }
                     Text(version.spanishText).textSelection(.enabled)
                     WritingScoreTags(meaning: version.meaningScore ?? 0,
                                      grammar: version.grammarScore ?? 0,
                                      wording: version.wordingScore ?? 0,
                                      naturalness: version.naturalnessScore ?? 0)
-                    if let feedback = version.feedback { Text(feedback).font(AppType.ui(15, weight: .regular)).foregroundStyle(.secondary) }
-                    if let corrected = version.correctedSpanish, !corrected.isEmpty {
-                        Label(corrected, systemImage: "checkmark.circle")
-                            .font(AppType.ui(15, weight: .regular)).textSelection(.enabled)
+                    Button {
+                        let shouldRequest = !expandedVersionIDs.contains(version.id) &&
+                            presentation(version) == nil
+                        withAnimation(GlassTheme.animation) {
+                            if expandedVersionIDs.contains(version.id) {
+                                expandedVersionIDs.remove(version.id)
+                            } else {
+                                expandedVersionIDs.insert(version.id)
+                            }
+                        }
+                        if shouldRequest {
+                            requestFormatting(version)
+                        }
+                    } label: {
+                        Label(expandedVersionIDs.contains(version.id) ? "收起修改意见" : "查看修改意见",
+                              systemImage: expandedVersionIDs.contains(version.id) ? "chevron.up" : "chevron.down")
                     }
-                    ForEach(version.errors ?? []) { error in
-                        Text("\(error.original) → \(error.correction)：\(error.explanation)")
-                            .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                    .buttonStyle(.link)
+                    .font(AppType.ui(13, weight: .medium))
+                    if expandedVersionIDs.contains(version.id) {
+                        feedbackDetails(version,
+                                        presentation: presentation(version),
+                                        isFormatting: isFormatting(version),
+                                        formattingFailed: formattingFailed(version))
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .historyEntryChrome()
+    }
+
+    @ViewBuilder
+    private func feedbackDetails(_ version: WritingVersion,
+                                 presentation: WritingFeedbackPresentation?,
+                                 isFormatting: Bool,
+                                 formattingFailed: Bool) -> some View {
+        WritingFeedbackDetailView(
+            version: version,
+            presentation: presentation,
+            isFormatting: isFormatting,
+            formattingFailed: formattingFailed,
+            retryAction: { requestFormatting(version) })
+    }
+}
+
+private struct WritingFeedbackDetailView: View {
+    let version: WritingVersion
+    let presentation: WritingFeedbackPresentation?
+    let isFormatting: Bool
+    let formattingFailed: Bool
+    let retryAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if isFormatting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在整理修改意见…")
+                }
+                .foregroundStyle(.secondary)
+            } else if let presentation {
+                if formattingFailed {
+                    HStack {
+                        Text("AI 排版失败，以下显示原始修改意见。")
+                            .font(AppType.ui(13, weight: .regular))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("重新整理", action: retryAction)
+                            .buttonStyle(.link)
+                    }
+                }
+                WritingFeedbackPresentationView(presentation: presentation)
+            } else {
+                Text("正在整理修改意见…")
+                    .font(AppType.ui(13, weight: .regular))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 800, alignment: .leading)
+        .padding(.top, 4)
+    }
+
+    static func fallbackPresentation(for version: WritingVersion) -> WritingFeedbackPresentation {
+        let blocks = WritingFeedbackDisplayFormatter.blocks(from: version.feedback ?? "")
+        let issueBlocks = blocks.filter(\.isBullet)
+        let paragraphs = blocks.filter { !$0.isBullet }
+        let issues = issueBlocks.map {
+            WritingFeedbackPresentationItem(title: "修改意见", explanation: $0.text, example: nil)
+        }
+        let summary = paragraphs.first?.text
+        let corrected = version.correctedSpanish?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let feedbackNormalized = WritingFeedbackDisplayFormatter.normalized(version.feedback ?? "")
+        let recommended = corrected.flatMap {
+            feedbackNormalized.contains(WritingFeedbackDisplayFormatter.normalized($0)) ? nil : $0
+        }
+        let improvements = (version.errors ?? []).map {
+            WritingFeedbackPresentationItem(
+                title: "\($0.original) → \($0.correction)",
+                explanation: $0.explanation,
+                example: nil)
+        }
+        return WritingFeedbackPresentation(summary: summary,
+                                           issues: issues,
+                                           recommendedExpression: recommended,
+                                           improvements: improvements)
+    }
+}
+
+private struct WritingFeedbackPresentationView: View {
+    let presentation: WritingFeedbackPresentation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let summary = presentation.summary, !summary.isEmpty {
+                WritingFeedbackSection(title: "修改意见") {
+                    Text(summary)
+                        .font(AppType.ui(14))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                }
+            }
+            if !presentation.issues.isEmpty {
+                WritingFeedbackSection(title: "核心问题") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(presentation.issues.enumerated()), id: \.offset) { index, item in
+                            WritingFeedbackPresentationItemView(index: index + 1, item: item)
+                        }
                     }
                 }
             }
+            if let expression = presentation.recommendedExpression, !expression.isEmpty {
+                WritingFeedbackExampleView(text: expression)
+            }
+            if !presentation.improvements.isEmpty {
+                WritingFeedbackSection(title: "进一步改进") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(presentation.improvements.enumerated()), id: \.offset) { _, item in
+                            WritingFeedbackPresentationItemView(index: nil, item: item)
+                        }
+                    }
+                }
+            }
+            if presentation.summary == nil &&
+                presentation.issues.isEmpty &&
+                presentation.recommendedExpression == nil &&
+                presentation.improvements.isEmpty {
+                Text("没有额外修改意见。")
+                    .font(AppType.ui(13))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        .padding(18)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22))
-        .padding(.vertical, 5)
+    }
+}
+
+private struct WritingFeedbackPresentationItemView: View {
+    let index: Int?
+    let item: WritingFeedbackPresentationItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(index.map { "\($0)." } ?? "•")
+                .font(AppType.ui(14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(AppType.ui(14, weight: .semibold))
+                Text(item.explanation)
+                    .font(AppType.ui(14))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(4)
+                    .textSelection(.enabled)
+                if let example = item.example, !example.isEmpty {
+                    Text(example)
+                        .font(AppType.latin(14))
+                        .foregroundStyle(.primary)
+                        .lineSpacing(3)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct WritingFeedbackSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(AppType.ui(15, weight: .semibold))
+                .foregroundStyle(.primary)
+            content
+        }
+    }
+}
+
+private struct WritingFeedbackItemView<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("•")
+                .font(AppType.ui(14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct WritingFeedbackBlockView: View {
+    let block: WritingFeedbackDisplayFormatter.Block
+
+    var body: some View {
+        if block.isBullet {
+            WritingFeedbackItemView {
+                Text(block.text)
+                    .font(AppType.ui(14, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        } else {
+            Text(block.text)
+                .font(AppType.ui(14, weight: .regular))
+                .foregroundStyle(.secondary)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+private struct WritingFeedbackExampleView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("推荐表达", systemImage: "checkmark.circle")
+                .font(AppType.ui(15, weight: .semibold))
+            Text(text)
+                .font(AppType.latin(15))
+                .foregroundStyle(.primary)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(GlassTheme.magenta.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: GlassTheme.controlRadius / 2, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: GlassTheme.controlRadius / 2, style: .continuous)
+                .strokeBorder(GlassTheme.magenta.opacity(0.16), lineWidth: 1)
+        }
+    }
+}
+
+private enum WritingFeedbackDisplayFormatter {
+    struct Block {
+        let text: String
+        let isBullet: Bool
+    }
+
+    static func blocks(from text: String) -> [Block] {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: .newlines)
+        var blocks: [Block] = []
+        var paragraph: [String] = []
+
+        func flushParagraph() {
+            let value = paragraph.joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { blocks.append(Block(text: value, isBullet: false)) }
+            paragraph.removeAll()
+        }
+
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty {
+                flushParagraph()
+                continue
+            }
+            let pieces = splitNumberedItems(line)
+            if pieces.count > 1 {
+                flushParagraph()
+                blocks.append(contentsOf: pieces.map { Block(text: $0, isBullet: true) })
+            } else if let bullet = bulletText(line) {
+                flushParagraph()
+                blocks.append(Block(text: bullet, isBullet: true))
+            } else {
+                paragraph.append(line)
+            }
+        }
+        flushParagraph()
+        return blocks
+    }
+
+    static func normalized(_ value: String) -> String {
+        value.lowercased()
+            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .punctuationCharacters)
+    }
+
+    private static func bulletText(_ line: String) -> String? {
+        let markers = ["•", "-", "–", "—"]
+        guard let marker = markers.first(where: { line.hasPrefix($0) }) else { return nil }
+        let value = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : String(value)
+    }
+
+    private static func splitNumberedItems(_ line: String) -> [String] {
+        let pattern = #"(?=(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)])\s*)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [line] }
+        let range = NSRange(line.startIndex..., in: line)
+        let starts = regex.matches(in: line, range: range).map(\.range.location)
+        guard starts.count > 1 else { return [line] }
+        return starts.enumerated().compactMap { index, start in
+            let end = index + 1 < starts.count ? starts[index + 1] : line.utf16.count
+            let startIndex = String.Index(utf16Offset: start, in: line)
+            let endIndex = String.Index(utf16Offset: end, in: line)
+            var item = String(line[startIndex..<endIndex]).trimmingCharacters(in: .whitespaces)
+            item = item.replacingOccurrences(of: #"^(?:[①②③④⑤⑥⑦⑧⑨⑩]|\d+[.)])\s*"#,
+                                             with: "", options: .regularExpression)
+            return item.isEmpty ? nil : item
+        }
     }
 }
 

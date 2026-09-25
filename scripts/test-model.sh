@@ -14,6 +14,7 @@ CLANG_MODULE_CACHE_PATH=/private/tmp/spanish-learning-clang-cache \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/AIStudyService.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/WritingAIService.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/ReadingAIService.swift" \
+  "$PROJECT_ROOT/Sources/SpanishLearningMac/CardQuality.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/TitleGenerationService.swift" \
   "$PROJECT_ROOT"/Sources/SpanishLearningMac/FSRSVendor_*.swift \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/FSRSScheduler.swift" \

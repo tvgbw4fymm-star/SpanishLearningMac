@@ -27,8 +27,31 @@ struct WritingFeedbackResult: Decodable, Sendable {
     struct CorrectionCard: Decodable, Sendable {
         let create: Bool
         let mergeKey: String
+        let title: String?
         let question: String
         let answer: String
+
+        init(create: Bool, mergeKey: String, title: String? = nil,
+             question: String, answer: String) {
+            self.create = create
+            self.mergeKey = mergeKey
+            self.title = title
+            self.question = question
+            self.answer = answer
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case create, mergeKey, title, question, answer
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            create = try container.decode(Bool.self, forKey: .create)
+            mergeKey = try container.decode(String.self, forKey: .mergeKey)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
+            question = try container.decode(String.self, forKey: .question)
+            answer = try container.decode(String.self, forKey: .answer)
+        }
     }
 
     let feedback: String
@@ -41,6 +64,21 @@ struct WritingFeedbackResult: Decodable, Sendable {
 struct WritingHintResult: Decodable, Sendable {
     let expressionIdeas: [String]
     let cautions: [String]
+}
+
+struct WritingFeedbackPresentation: Codable, Sendable {
+    let summary: String?
+    let issues: [WritingFeedbackPresentationItem]
+    let recommendedExpression: String?
+    let improvements: [WritingFeedbackPresentationItem]
+}
+
+struct WritingFeedbackPresentationItem: Codable, Sendable, Identifiable {
+    let title: String
+    let explanation: String
+    let example: String?
+
+    var id: String { "\(title)\u{001F}\(explanation)\u{001F}\(example ?? "")" }
 }
 
 private struct WritingResponsesEnvelope: Decodable {
@@ -77,6 +115,54 @@ enum WritingAIService {
         "additionalProperties": false
     ]
 
+    static let writingFeedbackPresentationSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "summary": [
+                "type": ["string", "null"],
+                "description": "原始反馈中的简短总体评价；没有明确总结时返回 null。"
+            ],
+            "issues": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "title": ["type": "string", "description": "一个问题的简短标题"],
+                        "explanation": ["type": "string", "description": "简洁中文解释，只说明一个问题"],
+                        "example": [
+                            "type": ["string", "null"],
+                            "description": "原始反馈中与该问题直接相关的西语例句；没有时返回 null。"
+                        ]
+                    ],
+                    "required": ["title", "explanation", "example"],
+                    "additionalProperties": false
+                ]
+            ],
+            "recommendedExpression": [
+                "type": ["string", "null"],
+                "description": "原始反馈中已有的完整推荐表达；没有时返回 null。"
+            ],
+            "improvements": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "title": ["type": "string", "description": "额外改进点的简短标题"],
+                        "explanation": ["type": "string", "description": "简洁中文说明"],
+                        "example": [
+                            "type": ["string", "null"],
+                            "description": "原始反馈中已有的示例；没有时返回 null。"
+                        ]
+                    ],
+                    "required": ["title", "explanation", "example"],
+                    "additionalProperties": false
+                ]
+            ]
+        ],
+        "required": ["summary", "issues", "recommendedExpression", "improvements"],
+        "additionalProperties": false
+    ]
+
     static func generateWritingHint(chinesePrompt: String,
                                     staticHint: String?,
                                     sourceContext: String?,
@@ -106,6 +192,52 @@ enum WritingAIService {
         return try await request(modelInput: input, instructions: instructions,
                                  schemaName: "writing_hint", schema: writingHintSchema,
                                  apiKey: apiKey, result: WritingHintResult.self)
+    }
+
+    static func formatWritingFeedback(chinesePrompt: String,
+                                      learnerSpanish: String,
+                                      scores: (meaning: Int, grammar: Int, wording: Int, naturalness: Int),
+                                      feedback: String?,
+                                      correctedSpanish: String?,
+                                      errors: [WritingError]?,
+                                      apiKey: String) async throws -> WritingFeedbackPresentation {
+        let input = """
+        中文题目：
+        \(chinesePrompt)
+
+        学习者当时提交的西语：
+        \(learnerSpanish)
+
+        已保存评分（只能原样保留，不得重新评分）：
+        意思 \(scores.meaning)/5，语法 \(scores.grammar)/5，用词 \(scores.wording)/5，自然度 \(scores.naturalness)/5
+
+        已保存原始反馈：
+        \(feedback?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? feedback! : "（无）")
+
+        已保存 correctedSpanish：
+        \(correctedSpanish?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? correctedSpanish! : "（无）")
+
+        已保存错误项：
+        \((errors ?? []).map { "\($0.original) → \($0.correction)：\($0.explanation)" }.joined(separator: "\n").isEmpty
+            ? "（无）"
+            : (errors ?? []).map { "\($0.original) → \($0.correction)：\($0.explanation)" }.joined(separator: "\n"))
+        """
+        let instructions = """
+        你是“历史反馈整理器”，不是重新批改作文。你的唯一任务是把已经保存的反馈整理成适合学习界面阅读的结构化 JSON。
+        必须严格遵守：
+        1. 不改变或重新计算任何评分。
+        2. 只能重组输入中已经存在的信息，不增加原反馈没有指出的新错误。
+        3. 不删除重要反馈；每个 issue 只讲一个问题，title 必须简短，explanation 使用简洁中文。
+        4. 不改变 correctedSpanish 的含义；recommendedExpression 只能使用输入中已有的完整推荐表达。
+        5. 同一个知识点只放在最合适的一个位置，避免 issues、recommendedExpression、improvements 重复。
+        6. 西语例句单独放入 example，不要埋在 explanation 中。
+        7. 不输出 Markdown、编号符号、长段落、水平双列内容或评价学习者水平。
+        8. 没有内容的可选字符串返回 null，issues 和 improvements 即使为空也必须返回 []。
+        """
+        return try await request(modelInput: input, instructions: instructions,
+                                 schemaName: "writing_feedback_presentation",
+                                 schema: writingFeedbackPresentationSchema,
+                                 apiKey: apiKey, result: WritingFeedbackPresentation.self)
     }
 
     static func generatePrompt(sourceSpanish: String, sourceKind: String,
@@ -187,10 +319,11 @@ enum WritingAIService {
                     "properties": [
                         "create": ["type": "boolean"],
                         "mergeKey": ["type": "string", "description": "写作纠错|规范化结构或词元|具体错误义项；不制卡时为空字符串"],
+                        "title": ["type": ["string", "null"], "description": "可选的极简错误结构名称，不写解释句；不制卡时返回 null"],
                         "question": ["type": "string", "description": "可主动回忆的卡片正面；不制卡时为空字符串"],
                         "answer": ["type": "string", "description": "详细解释和一到两个不同语境例句；不制卡时为空字符串"]
                     ],
-                    "required": ["create", "mergeKey", "question", "answer"],
+                    "required": ["create", "mergeKey", "title", "question", "answer"],
                     "additionalProperties": false
                 ]
             ],
@@ -207,7 +340,7 @@ enum WritingAIService {
         let instructions = """
         你是严谨但简洁的西班牙语写作教师。用中文反馈，不要因为与参考答案措辞不同就判错；先检查意思是否完整，再检查语法、用词和自然度。四项分别按 1 到 5 分评分，并逐项如实区分。errors 只列真实且值得改进的问题；original 必须引用学习者文本中的短片段，correction 给出局部修改，explanation 简明说明原因。correctedSpanish 应保留学习者想表达的内容，不扩写成另一篇文章。
 
-        只有错误具有迁移价值、以后很可能再次出现时才创建一张写作纠错卡。卡片要能主动回忆，mergeKey 对相同结构与同一错误义项保持稳定。若涉及动词，先解释动词的本质语义，再解释本题中的作用，并给一到两个不同语境的西语例句和中文说明。若没有值得制卡的错误，create=false，其余三个字段返回空字符串。
+        只有错误具有迁移价值、以后很可能再次出现时才创建一张写作纠错卡。卡片要能主动回忆，title 只写最短的错误结构或词元名称，mergeKey 对相同结构与同一错误义项保持稳定。若涉及动词，先解释动词的本质语义，再解释本题中的作用，并给一到两个不同语境的西语例句和中文说明。若没有值得制卡的错误，create=false，title 返回 null，其余三个字段返回空字符串。
         """
         return try await request(modelInput: input, instructions: instructions,
                                  schemaName: "writing_feedback", schema: schema,

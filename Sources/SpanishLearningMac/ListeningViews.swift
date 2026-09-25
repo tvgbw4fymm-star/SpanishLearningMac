@@ -19,6 +19,7 @@ struct ListeningView: View {
     @State private var learningPoints: [LearningPointRequest] = ListeningView.defaultPoints()
     @State private var isAnalyzingListening = false
     @State private var isGeneratingCards = false
+    @State private var isAuditingCards = false
     @State private var showPasteSubtitles = false
 
     private var material: AudioMaterial? {
@@ -205,12 +206,12 @@ struct ListeningView: View {
                                     LearningPointsEditor(points: $learningPoints)
                                     HStack {
                                         Spacer()
-                                        if isGeneratingCards { ProgressView().controlSize(.small) }
+                                        if isGeneratingCards || isAuditingCards { ProgressView().controlSize(.small) }
                                         Button("生成卡片草稿") {
                                             generateListeningCards(material, sentence)
                                         }
                                         .buttonStyle(AppActionButtonStyle(prominent: true))
-                                        .disabled(isGeneratingCards)
+                                        .disabled(isGeneratingCards || isAuditingCards)
                                     }
                                 } else {
                                     HStack {
@@ -304,13 +305,32 @@ struct ListeningView: View {
                 let result = try await AIStudyService.generateListeningCards(
                     transcript: sentence.transcript, points: filled, apiKey: key
                 )
-                try store.saveListeningCards(materialID: material.id, sentenceID: sentence.id,
-                                             points: filled, result: result)
-                status = "\(filled.count) 张卡片草稿已保存。"
                 isGeneratingCards = false
+                isAuditingCards = true
+                status = "正在整理卡片…"
+                var auditedCards: [ListeningCardsResult.Card] = []
+                var fallbackCount = 0
+                for card in result.cards {
+                    let draft = CardDraft(category: card.category, mergeKey: card.mergeKey,
+                                          question: card.question, answer: card.answer)
+                    let audited = await CardAuditService.auditOrFallback(draft, apiKey: key)
+                    if audited.usedFallback { fallbackCount += 1 }
+                    auditedCards.append(.init(requestID: card.requestID, category: card.category,
+                                              mergeKey: card.mergeKey, title: audited.title,
+                                              question: audited.question, answer: audited.answer))
+                }
+                let auditedResult = ListeningCardsResult(cards: auditedCards)
+                try store.saveListeningCards(materialID: material.id, sentenceID: sentence.id,
+                                             points: filled, result: auditedResult)
+                status = fallbackCount == 0
+                    ? "\(filled.count) 张卡片草稿已保存。"
+                    : "\(filled.count) 张卡片草稿已保存。\(fallbackCount) 张使用基础整理版本；可在卡片详情中重新整理。"
+                isGeneratingCards = false
+                isAuditingCards = false
             } catch {
                 status = error.localizedDescription
                 isGeneratingCards = false
+                isAuditingCards = false
             }
         }
     }
@@ -1076,15 +1096,23 @@ struct DictationHistoryView: View {
                 StudyEmptyState(title: "还没有听写记录", message: "完成一条听写后，可按日期在这里重听和回顾。",
                                 symbol: "clock.arrow.circlepath")
             } else {
-                List {
-                    ForEach(dates.filter { selectedDate == nil || $0 == selectedDate }, id: \.self) { day in
-                        Section(day.formatted(date: .complete, time: .omitted)) {
-                            ForEach(attempts(on: day)) { attempt in
-                                DictationHistoryRow(attempt: attempt, material: material(for: attempt)) {
-                                    retry(attempt)
+                HistoryPanel {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(dates.filter { selectedDate == nil || $0 == selectedDate }, id: \.self) { day in
+                                Text(day.formatted(date: .complete, time: .omitted))
+                                    .font(AppType.ui(17, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                ForEach(attempts(on: day)) { attempt in
+                                    DictationHistoryRow(attempt: attempt, material: material(for: attempt)) {
+                                        retry(attempt)
+                                    }
+                                    .historyEntryChrome()
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
@@ -1121,7 +1149,6 @@ private struct DictationHistoryRow: View {
             }
             Button("再次听写", action: onRetry).disabled(sentence == nil)
         }
-        .padding(.vertical, 6)
     }
 }
 

@@ -136,6 +136,47 @@ struct GlassCard<Content: View>: View {
     }
 }
 
+    struct HistoryPanel<Content: View>: View {
+        @ViewBuilder let content: Content
+
+        init(@ViewBuilder content: () -> Content) {
+            self.content = content()
+        }
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: GlassTheme.cardRadius, style: .continuous)
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                content
+                    .padding(14)
+            }
+            .clipShape(shape)
+            .overlay {
+                shape.strokeBorder(GlassTheme.border, lineWidth: 1)
+            }
+    }
+}
+
+struct HistoryEntryChrome: ViewModifier {
+    private let shape = RoundedRectangle(cornerRadius: GlassTheme.controlRadius, style: .continuous)
+
+    func body(content: Content) -> some View {
+        content
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.075), in: shape)
+            .overlay {
+                shape.strokeBorder(.white.opacity(0.12), lineWidth: 1)
+            }
+    }
+}
+
+extension View {
+    func historyEntryChrome() -> some View {
+        modifier(HistoryEntryChrome())
+    }
+}
+
 struct GlassGroupBoxStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
         GlassCard {

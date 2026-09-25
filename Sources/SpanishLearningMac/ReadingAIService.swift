@@ -10,8 +10,35 @@ struct ReadingCardsResult: Decodable, Sendable {
         let create: Bool
         let category: CardCategory
         let mergeKey: String
+        let title: String?
         let question: String
         let answer: String
+
+        init(discussionID: String, create: Bool, category: CardCategory, mergeKey: String,
+             title: String? = nil, question: String, answer: String) {
+            self.discussionID = discussionID
+            self.create = create
+            self.category = category
+            self.mergeKey = mergeKey
+            self.title = title
+            self.question = question
+            self.answer = answer
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case discussionID, create, category, mergeKey, title, question, answer
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            discussionID = try container.decode(String.self, forKey: .discussionID)
+            create = try container.decode(Bool.self, forKey: .create)
+            category = try container.decode(CardCategory.self, forKey: .category)
+            mergeKey = try container.decode(String.self, forKey: .mergeKey)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
+            question = try container.decode(String.self, forKey: .question)
+            answer = try container.decode(String.self, forKey: .answer)
+        }
     }
     let cards: [Card]
 }
@@ -71,10 +98,11 @@ enum ReadingAIService {
                             "create": ["type": "boolean"],
                             "category": ["type": "string", "enum": CardCategory.allCases.map(\.rawValue)],
                             "mergeKey": ["type": "string"],
+                            "title": ["type": ["string", "null"], "description": "可选的极简学习点名称，不写解释句。"],
                             "question": ["type": "string"],
                             "answer": ["type": "string"]
                         ],
-                        "required": ["discussionID", "create", "category", "mergeKey", "question", "answer"],
+                        "required": ["discussionID", "create", "category", "mergeKey", "title", "question", "answer"],
                         "additionalProperties": false
                     ]
                 ]
