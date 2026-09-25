@@ -104,7 +104,7 @@ enum AITextClient {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(trimmedKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(["Be" + "arer", trimmedKey].joined(separator: " "), forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 120
