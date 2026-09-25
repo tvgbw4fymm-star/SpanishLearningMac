@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SpanishLearningMac}",
+            "name": "Debug SpanishLearningMac",
+            "target": "SpanishLearningMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SpanishLearningMac"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SpanishLearningMac}",
+            "name": "Release SpanishLearningMac",
+            "target": "SpanishLearningMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SpanishLearningMac"
+        }
+    ]
+}

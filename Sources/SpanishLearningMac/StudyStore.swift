@@ -1,0 +1,872 @@
+import Foundation
+import AppKit
+
+@MainActor
+final class StudyStore: ObservableObject {
+    @Published private(set) var data: StudyDatabase
+    @Published var errorMessage: String?
+
+    let supportDirectory: URL
+    private let databaseURL: URL
+    private let mediaDirectory: URL
+    private var canWrite = true
+    @Published private(set) var transferInProgress = false
+    @Published private(set) var activeTranscriptions: Set<UUID> = []
+    @Published private(set) var transcriptionStatus: [UUID: String] = [:]
+    private var transcriptionTasks: [UUID: Task<Void, Never>] = [:]
+
+    init(baseDirectory: URL? = nil) {
+        let base = baseDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SpanishLearningMac", isDirectory: true)
+        supportDirectory = base
+        databaseURL = base.appendingPathComponent("study.json")
+        mediaDirectory = base.appendingPathComponent("Media", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: databaseURL.path) {
+                let payload = try Data(contentsOf: databaseURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let loaded = try decoder.decode(StudyDatabase.self, from: payload)
+                guard loaded.schemaVersion == 1 else { throw StoreError.unsupportedVersion }
+                data = loaded
+            } else {
+                data = StudyDatabase()
+            }
+        } catch {
+            data = StudyDatabase()
+            canWrite = false
+            errorMessage = "无法读取本机学习资料：\(error.localizedDescription)。应用不会覆盖原文件。"
+        }
+        if canWrite {
+            let previous = data.readingRecords
+            let consolidated = Self.consolidatedReadingRecords(previous)
+            if consolidated.count != previous.count {
+                data.readingRecords = consolidated
+                do { try save() }
+                catch {
+                    data.readingRecords = previous
+                    errorMessage = "阅读历史合并未能保存：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func importAudio(from source: URL) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        let id = UUID()
+        let fileName = id.uuidString + "." + source.pathExtension.lowercased()
+        let destination = mediaDirectory.appendingPathComponent(fileName)
+        try FileManager.default.copyItem(at: source, to: destination)
+        data.audioMaterials.append(AudioMaterial(id: id, title: source.deletingPathExtension().lastPathComponent,
+                                                 fileName: fileName, importedAt: .now))
+        do { try save() } catch {
+            data.audioMaterials.removeAll { $0.id == id }
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
+    func importSubtitles(from source: URL, materialID: UUID) throws {
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
+        let segments = try SubtitleImporter.parse(Data(contentsOf: source))
+        try setTranscript(materialID: materialID, segments: segments)
+        let previous = data.audioMaterials[index]
+        data.audioMaterials[index].transcriptionComplete = true
+        data.audioMaterials[index].transcribedThroughSeconds = segments.last?.endSeconds
+        do { try save() } catch { data.audioMaterials[index] = previous; throw error }
+    }
+
+    func generateAudioTitle(materialID: UUID) async throws {
+        guard let material = data.audioMaterials.first(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
+        let transcript = material.sentences.prefix(35).map(\.transcript).joined(separator: " ")
+        guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let title = try await TitleGenerationService.generate(from: transcript, kind: "听力素材")
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { return }
+        let previous = data.audioMaterials[index].title
+        data.audioMaterials[index].title = title
+        do { try save() } catch { data.audioMaterials[index].title = previous; throw error }
+    }
+
+    func audioURL(for material: AudioMaterial) -> URL {
+        mediaDirectory.appendingPathComponent(material.fileName)
+    }
+
+    func startTranscription(materialID: UUID) throws {
+        guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
+        guard let material = data.audioMaterials.first(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard material.transcriptionComplete != true else { return }
+        guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }) else { throw StoreError.transcriptionLocked }
+        let source = audioURL(for: material)
+        let offset = material.transcribedThroughSeconds ?? 0
+        activeTranscriptions.insert(materialID)
+        transcriptionStatus[materialID] = "正在转写并保存进度…"
+        transcriptionTasks[materialID] = Task {
+            do {
+                try await TranscriptionService.transcribe(audioURL: source, startingAt: offset) { segments, through in
+                    try await MainActor.run {
+                        try self.appendTranscriptChunk(materialID: materialID, segments: segments, through: through)
+                        self.transcriptionStatus[materialID] = "已转写到 \(Int(through) / 60):\(String(format: "%02d", Int(through) % 60))，进度已保存。"
+                    }
+                }
+                try completeTranscription(materialID: materialID)
+                transcriptionStatus[materialID] = "转写完成。请核对句子与时间，再开始听写。"
+                do { try await generateAudioTitle(materialID: materialID) }
+                catch { transcriptionStatus[materialID] = "转写已保存，标题生成失败：\(error.localizedDescription)" }
+            } catch is CancellationError {
+                transcriptionStatus[materialID] = "已暂停；下次可从已保存的位置继续。"
+            } catch {
+                transcriptionStatus[materialID] = error.localizedDescription
+            }
+            activeTranscriptions.remove(materialID)
+            transcriptionTasks.removeValue(forKey: materialID)
+        }
+    }
+
+    func pauseTranscription(materialID: UUID) {
+        transcriptionTasks[materialID]?.cancel()
+    }
+
+    func setTranscript(materialID: UUID, segments: [ListeningSentence]) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }),
+              !data.cards.contains(where: { card in card.sources.contains { $0.materialID == materialID } })
+        else { throw StoreError.transcriptionLocked }
+        let previous = data.audioMaterials[index].sentences
+        data.audioMaterials[index].sentences = segments
+        do { try save() } catch { data.audioMaterials[index].sentences = previous; throw error }
+    }
+
+    func appendTranscriptChunk(materialID: UUID, segments: [ListeningSentence], through seconds: Double) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }) else { throw StoreError.transcriptionLocked }
+        let previous = data.audioMaterials[index]
+        let current = previous.sentences.count
+        data.audioMaterials[index].sentences += segments.enumerated().map { offset, segment in
+            var numbered = segment
+            numbered.ordinal = current + offset + 1
+            return numbered
+        }
+        data.audioMaterials[index].transcribedThroughSeconds = seconds
+        data.audioMaterials[index].transcriptionComplete = false
+        do { try save() } catch { data.audioMaterials[index] = previous; throw error }
+    }
+
+    func completeTranscription(materialID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        let previous = data.audioMaterials[index]
+        if previous.sentences.isEmpty {
+            data.audioMaterials[index].transcribedThroughSeconds = nil
+            data.audioMaterials[index].transcriptionComplete = false
+            try save()
+            throw StoreError.noSpeech
+        }
+        data.audioMaterials[index].transcriptionComplete = true
+        do { try save() } catch { data.audioMaterials[index] = previous; throw error }
+    }
+
+    func updateSentence(materialID: UUID, sentenceID: UUID, text: String, start: Double, end: Double) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        guard start >= 0, end > start, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw StoreError.invalidSentence }
+        let previous = data.audioMaterials[m].sentences[s]
+        data.audioMaterials[m].sentences[s].transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        data.audioMaterials[m].sentences[s].startSeconds = start
+        data.audioMaterials[m].sentences[s].endSeconds = end
+        data.audioMaterials[m].sentences[s].version += 1
+        data.audioMaterials[m].sentences[s].status = .corrected
+        do { try save() } catch { data.audioMaterials[m].sentences[s] = previous; throw error }
+    }
+
+    func splitSentence(materialID: UUID, sentenceID: UUID,
+                       firstText: String, secondText: String, at splitSeconds: Double) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        guard !isReferencedSentence(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.sentenceReferenced }
+        let first = firstText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let second = secondText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previous = data.audioMaterials[m].sentences
+        let old = previous[s]
+        guard !first.isEmpty, !second.isEmpty,
+              splitSeconds > old.startSeconds, splitSeconds < old.endSeconds else { throw StoreError.invalidSentence }
+        data.audioMaterials[m].sentences[s].transcript = first
+        data.audioMaterials[m].sentences[s].endSeconds = splitSeconds
+        data.audioMaterials[m].sentences[s].status = .corrected
+        data.audioMaterials[m].sentences[s].version += 1
+        let added = ListeningSentence(id: UUID(), ordinal: old.ordinal + 1, startSeconds: splitSeconds,
+                                      endSeconds: old.endSeconds, transcript: second, status: .corrected, version: 1)
+        data.audioMaterials[m].sentences.insert(added, at: s + 1)
+        for i in data.audioMaterials[m].sentences.indices { data.audioMaterials[m].sentences[i].ordinal = i + 1 }
+        do { try save() } catch { data.audioMaterials[m].sentences = previous; throw error }
+    }
+
+    func mergeWithNext(materialID: UUID, sentenceID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID),
+              s + 1 < data.audioMaterials[m].sentences.count else { throw StoreError.missingSentence }
+        let next = data.audioMaterials[m].sentences[s + 1]
+        guard !isReferencedSentence(materialID: materialID, sentenceID: sentenceID),
+              !isReferencedSentence(materialID: materialID, sentenceID: next.id) else { throw StoreError.sentenceReferenced }
+        let previous = data.audioMaterials[m].sentences
+        data.audioMaterials[m].sentences[s].transcript += " " + next.transcript
+        data.audioMaterials[m].sentences[s].endSeconds = next.endSeconds
+        data.audioMaterials[m].sentences[s].version += 1
+        data.audioMaterials[m].sentences[s].status = .corrected
+        data.audioMaterials[m].sentences.remove(at: s + 1)
+        for i in data.audioMaterials[m].sentences.indices { data.audioMaterials[m].sentences[i].ordinal = i + 1 }
+        do { try save() } catch { data.audioMaterials[m].sentences = previous; throw error }
+    }
+
+    private func isReferencedSentence(materialID: UUID, sentenceID: UUID) -> Bool {
+        data.dictationAttempts.contains { $0.materialID == materialID && $0.sentenceID == sentenceID } ||
+        data.cards.contains { card in card.sources.contains { $0.materialID == materialID && $0.segmentID == sentenceID } }
+    }
+
+    func verifyTranscript(materialID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        let previous = data.audioMaterials[index].sentences
+        guard !previous.isEmpty else { throw StoreError.missingSentence }
+        guard data.audioMaterials[index].transcriptionComplete == true else { throw StoreError.transcriptionIncomplete }
+        for i in data.audioMaterials[index].sentences.indices where data.audioMaterials[index].sentences[i].status == .generated {
+            data.audioMaterials[index].sentences[i].status = .verified
+        }
+        do { try save() } catch { data.audioMaterials[index].sentences = previous; throw error }
+    }
+
+    func saveDictationDraft(materialID: UUID, sentenceID: UUID, text: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        let previous = data.audioMaterials[m].sentences[s].draftText
+        data.audioMaterials[m].sentences[s].draftText = text
+        do { try save() } catch { data.audioMaterials[m].sentences[s].draftText = previous; throw error }
+    }
+
+    func revealAnswer(materialID: UUID, sentenceID: UUID, text: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        let priorSentence = data.audioMaterials[m].sentences[s]
+        let attempt = DictationAttempt(id: UUID(), materialID: materialID, sentenceID: sentenceID,
+                                       submittedAt: .now, text: text, answerWasShown: true,
+                                       answerTextSnapshot: priorSentence.transcript, answerVersion: priorSentence.version)
+        data.audioMaterials[m].sentences[s].draftText = text
+        data.audioMaterials[m].sentences[s].answerRevealed = true
+        data.dictationAttempts.append(attempt)
+        do { try save() } catch {
+            data.audioMaterials[m].sentences[s] = priorSentence
+            data.dictationAttempts.removeAll { $0.id == attempt.id }
+            throw error
+        }
+    }
+
+    func saveListeningAIResult(materialID: UUID, sentenceID: UUID, attempt: String,
+                               points: [LearningPointRequest], result: ListeningAIResult) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        let byID = Dictionary(uniqueKeysWithValues: result.cards.compactMap { card in
+            UUID(uuidString: card.requestID).map { ($0, card) }
+        })
+        guard byID.count == points.count, points.allSatisfy({ byID[$0.id] != nil }) else { throw AIStudyError.invalidResponse }
+        let priorSentence = data.audioMaterials[m].sentences[s]
+        let priorCards = data.cards
+
+        // A regenerated sentence may have unconfirmed drafts from an earlier run.
+        // Detach only this sentence's source; cards shared with other sources survive.
+        let oldDraftIDs = Set((priorSentence.learningPoints ?? []).map(\.cardID))
+        for index in data.cards.indices.reversed() where oldDraftIDs.contains(data.cards[index].id) && data.cards[index].confirmedAt == nil {
+            data.cards[index].sources.removeAll { $0.materialID == materialID && $0.segmentID == sentenceID }
+            if data.cards[index].sources.isEmpty { data.cards.remove(at: index) }
+        }
+
+        var links: [ListeningLearningPoint] = []
+        for point in points {
+            guard let generated = byID[point.id] else { continue }
+            let key = Self.normalizedMergeKey(generated.mergeKey)
+            let source = SourceReference(materialID: materialID, segmentID: sentenceID,
+                                         quote: priorSentence.transcript)
+            let cardID: UUID
+            if let existing = data.cards.firstIndex(where: {
+                $0.category == generated.category &&
+                Self.normalizedMergeKey($0.mergeKey ?? "") == key && !key.isEmpty
+            }) {
+                cardID = data.cards[existing].id
+                let alreadyLinked = data.cards[existing].sources.contains {
+                    $0.materialID == materialID && $0.segmentID == sentenceID
+                }
+                if !alreadyLinked { data.cards[existing].sources.append(source) }
+                data.cards[existing].updatedAt = .now
+            } else {
+                cardID = UUID()
+                data.cards.append(StudyCard(id: cardID, category: generated.category,
+                                            question: generated.question, answer: generated.answer,
+                                            sources: [source], confirmedAt: nil, dueAt: nil,
+                                            fsrsState: nil, createdAt: .now, updatedAt: .now,
+                                            revisionCount: 0, mergeKey: key))
+            }
+            links.append(ListeningLearningPoint(id: point.id, category: generated.category,
+                                                prompt: point.prompt, cardID: cardID))
+        }
+        data.audioMaterials[m].sentences[s].analysis = ListeningAnalysis(userAttemptSnapshot: attempt,
+                                                                         explanation: result.explanation,
+                                                                         generatedAt: .now)
+        data.audioMaterials[m].sentences[s].learningPoints = links
+        do { try save() } catch {
+            data.audioMaterials[m].sentences[s] = priorSentence
+            data.cards = priorCards
+            throw error
+        }
+    }
+
+    private static func readingCardQuestion(_ card: ReadingCardsResult.Card) -> String {
+        let proposed = card.question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard card.category == .vocabulary else { return proposed }
+        let parts = card.mergeKey.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return proposed }
+        let word = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'«»“”‘’¿?：:"))
+        return word.isEmpty ? proposed : word
+    }
+
+    private static func normalizedMergeKey(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "es"))
+            .lowercased()
+    }
+
+    func updateCardDraft(_ cardID: UUID, category: CardCategory, question: String, answer: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }) else { throw StoreError.missingCard }
+        guard data.cards[index].confirmedAt == nil else { throw StoreError.cardConfirmed }
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuestion.isEmpty, !cleanAnswer.isEmpty else { throw StoreError.emptyCard }
+        let previous = data.cards[index]
+        data.cards[index].category = category
+        data.cards[index].question = cleanQuestion
+        data.cards[index].answer = cleanAnswer
+        data.cards[index].updatedAt = .now
+        data.cards[index].revisionCount = (data.cards[index].revisionCount ?? 0) + 1
+        do { try save() } catch { data.cards[index] = previous; throw error }
+    }
+
+    func confirmCard(_ cardID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }) else { throw StoreError.missingCard }
+        let previous = data.cards[index]
+        data.cards[index].confirmedAt = .now
+        data.cards[index].dueAt = .now
+        data.cards[index].updatedAt = .now
+        do { try save() } catch { data.cards[index] = previous; throw error }
+    }
+
+    func reviewCard(_ cardID: UUID, grade: ReviewGrade, now: Date = .now) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.cards.firstIndex(where: { $0.id == cardID }) else { throw StoreError.missingCard }
+        guard data.cards[index].confirmedAt != nil else { throw StoreError.unconfirmedCard }
+        let priorCard = data.cards[index]
+        let result = try LocalFSRSScheduler.schedule(card: priorCard, grade: grade, now: now)
+        let event = ReviewEvent(id: UUID(), cardID: cardID, reviewedAt: now,
+                                grade: grade.rawValue, nextDueAt: result.dueAt,
+                                scheduledDays: result.scheduledDays, elapsedDays: result.elapsedDays)
+        data.cards[index].fsrsState = result.state
+        data.cards[index].dueAt = result.dueAt
+        data.cards[index].updatedAt = now
+        data.reviewEvents.append(event)
+        do { try save() } catch {
+            data.cards[index] = priorCard
+            data.reviewEvents.removeAll { $0.id == event.id }
+            throw error
+        }
+    }
+
+    func startRetry(materialID: UUID, sentenceID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        let previous = data.audioMaterials[m].sentences[s]
+        data.audioMaterials[m].sentences[s].draftText = nil
+        data.audioMaterials[m].sentences[s].answerRevealed = false
+        do { try save() } catch { data.audioMaterials[m].sentences[s] = previous; throw error }
+    }
+
+    private func sentenceLocation(materialID: UUID, sentenceID: UUID) -> (Int, Int)? {
+        guard let m = data.audioMaterials.firstIndex(where: { $0.id == materialID }),
+              let s = data.audioMaterials[m].sentences.firstIndex(where: { $0.id == sentenceID }) else { return nil }
+        return (m, s)
+    }
+
+    struct WritingSaveResult {
+        let exerciseID: UUID
+        let versionID: UUID
+        let cardID: UUID?
+    }
+
+    @discardableResult
+    func saveWritingFeedback(exerciseID requestedID: UUID?, mode: WritingMode,
+                             sourceID: UUID?, sourceSegmentID: UUID?, sourceQuote: String?,
+                             chinesePrompt: String, referenceSpanish: String?, focus: String?,
+                             learnerSpanish: String, result: WritingFeedbackResult,
+                             submittedAt: Date = .now) throws -> WritingSaveResult {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        let prompt = chinesePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spanish = learnerSpanish.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !spanish.isEmpty else { throw StoreError.emptyWriting }
+        let priorExercises = data.writingExercises
+        let priorCards = data.cards
+        let exerciseID = requestedID ?? UUID()
+        let exerciseIndex: Int
+        if let requestedID {
+            guard let index = data.writingExercises.firstIndex(where: { $0.id == requestedID }) else {
+                throw StoreError.missingWritingExercise
+            }
+            exerciseIndex = index
+        } else {
+            data.writingExercises.append(WritingExercise(id: exerciseID, sourceID: sourceID,
+                                                          chinesePrompt: prompt, versions: [],
+                                                          sourceSegmentID: sourceSegmentID,
+                                                          sourceQuote: sourceQuote,
+                                                          referenceSpanish: referenceSpanish,
+                                                          focus: focus, createdAt: submittedAt,
+                                                          mode: mode))
+            exerciseIndex = data.writingExercises.count - 1
+        }
+
+        let versionID = UUID()
+        var correctionCardID: UUID?
+        if result.card.create {
+            let key = Self.normalizedMergeKey(result.card.mergeKey)
+            let question = result.card.question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let answer = result.card.answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty, !question.isEmpty, !answer.isEmpty {
+                let source = SourceReference(materialID: exerciseID, segmentID: versionID, quote: spanish)
+                if let existing = data.cards.firstIndex(where: {
+                    $0.category == .correction && Self.normalizedMergeKey($0.mergeKey ?? "") == key
+                }) {
+                    correctionCardID = data.cards[existing].id
+                    if !data.cards[existing].sources.contains(where: {
+                        $0.materialID == exerciseID && $0.segmentID == versionID
+                    }) {
+                        data.cards[existing].sources.append(source)
+                    }
+                    data.cards[existing].updatedAt = submittedAt
+                } else {
+                    let id = UUID()
+                    correctionCardID = id
+                    data.cards.append(StudyCard(id: id, category: .correction,
+                                                question: question, answer: answer,
+                                                sources: [source], confirmedAt: nil,
+                                                dueAt: nil, fsrsState: nil,
+                                                createdAt: submittedAt, updatedAt: submittedAt,
+                                                revisionCount: 0, mergeKey: key))
+                }
+            }
+        }
+
+        let errors = result.errors.map {
+            WritingError(id: UUID(), original: $0.original,
+                         correction: $0.correction, explanation: $0.explanation)
+        }
+        let version = WritingVersion(id: versionID, submittedAt: submittedAt,
+                                     spanishText: spanish, feedback: result.feedback,
+                                     meaningScore: result.scores.meaning,
+                                     grammarScore: result.scores.grammar,
+                                     wordingScore: result.scores.wording,
+                                     naturalnessScore: result.scores.naturalness,
+                                     correctedSpanish: result.correctedSpanish,
+                                     errors: errors, cardID: correctionCardID)
+        data.writingExercises[exerciseIndex].versions.append(version)
+        do { try save() } catch {
+            data.writingExercises = priorExercises
+            data.cards = priorCards
+            throw error
+        }
+        return WritingSaveResult(exerciseID: exerciseID, versionID: versionID, cardID: correctionCardID)
+    }
+
+    @discardableResult
+    func saveReadingDiscussion(articleID: UUID, chunkID: UUID,
+                               question: String, answer: String,
+                               askedAt: Date = .now) throws -> UUID {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let articleIndex = data.articles.firstIndex(where: { $0.id == articleID }),
+              let chunkIndex = data.articles[articleIndex].chunks.firstIndex(where: { $0.id == chunkID }) else {
+            throw StoreError.missingReadingChunk
+        }
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuestion.isEmpty, !cleanAnswer.isEmpty else { throw StoreError.emptyReadingQuestion }
+        let item = ReadingDiscussionItem(id: UUID(), askedAt: askedAt,
+                                         question: cleanQuestion, answer: cleanAnswer)
+        let previous = data.articles[articleIndex].chunks[chunkIndex].discussion
+        if data.articles[articleIndex].chunks[chunkIndex].discussion == nil {
+            data.articles[articleIndex].chunks[chunkIndex].discussion = []
+        }
+        data.articles[articleIndex].chunks[chunkIndex].discussion?.append(item)
+        do { try save() } catch {
+            data.articles[articleIndex].chunks[chunkIndex].discussion = previous
+            throw error
+        }
+        return item.id
+    }
+
+    func pendingReadingDiscussions(articleID: UUID, chunkID: UUID) -> [ReadingDiscussionItem] {
+        guard let chunk = data.articles.first(where: { $0.id == articleID })?
+            .chunks.first(where: { $0.id == chunkID }) else { return [] }
+        let processed = Set(data.readingRecords
+            .filter { $0.articleID == articleID && $0.chunkID == chunkID }
+            .flatMap { $0.discussionIDs ?? [] })
+        return (chunk.discussion ?? []).filter { !processed.contains($0.id) }
+    }
+
+    func completeReadingWithCards(articleID: UUID, chunkID: UUID,
+                                  difficulty: ReadingDifficulty, note: String,
+                                  result: ReadingCardsResult?, completedAt: Date = .now) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let articleIndex = data.articles.firstIndex(where: { $0.id == articleID }),
+              let chunkIndex = data.articles[articleIndex].chunks.firstIndex(where: { $0.id == chunkID }) else {
+            throw StoreError.missingReadingChunk
+        }
+        let discussion = pendingReadingDiscussions(articleID: articleID, chunkID: chunkID)
+        let priorRecords = data.readingRecords
+        let priorCards = data.cards
+        var cardIDs: [UUID] = []
+        if let result {
+            let generatedByID = Dictionary(uniqueKeysWithValues: result.cards.compactMap { card in
+                UUID(uuidString: card.discussionID).map { ($0, card) }
+            })
+            guard generatedByID.count == discussion.count,
+                  discussion.allSatisfy({ generatedByID[$0.id] != nil }) else { throw AIStudyError.invalidResponse }
+            for item in discussion {
+                guard let generated = generatedByID[item.id], generated.create else { continue }
+                let key = Self.normalizedMergeKey(generated.mergeKey)
+                let question = Self.readingCardQuestion(generated)
+                let answer = generated.answer.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty, !question.isEmpty, !answer.isEmpty else { throw AIStudyError.invalidResponse }
+                let source = SourceReference(materialID: articleID, segmentID: chunkID,
+                                             quote: data.articles[articleIndex].chunks[chunkIndex].text)
+                let cardID: UUID
+                if let existing = data.cards.firstIndex(where: {
+                    $0.category == generated.category && Self.normalizedMergeKey($0.mergeKey ?? "") == key
+                }) {
+                    cardID = data.cards[existing].id
+                    if !data.cards[existing].sources.contains(where: {
+                        $0.materialID == articleID && $0.segmentID == chunkID
+                    }) {
+                        data.cards[existing].sources.append(source)
+                    }
+                    data.cards[existing].updatedAt = completedAt
+                } else {
+                    cardID = UUID()
+                    data.cards.append(StudyCard(id: cardID, category: generated.category,
+                                                question: question, answer: answer,
+                                                sources: [source], confirmedAt: nil,
+                                                dueAt: nil, fsrsState: nil,
+                                                createdAt: completedAt, updatedAt: completedAt,
+                                                revisionCount: 0, mergeKey: key))
+                }
+                if !cardIDs.contains(cardID) { cardIDs.append(cardID) }
+            }
+        }
+        let record = ReadingRecord(id: UUID(), articleID: articleID, chunkID: chunkID,
+                                   completedAt: completedAt, difficulty: difficulty,
+                                   questions: discussion.map(\.question), note: note,
+                                   discussionIDs: discussion.map(\.id), cardIDs: cardIDs)
+        upsertReadingRecord(record)
+        do { try save() } catch {
+            data.readingRecords = priorRecords
+            data.cards = priorCards
+            throw error
+        }
+    }
+
+    func addArticle(title: String, source: String, text: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty, !cleanText.isEmpty else { throw StoreError.emptyArticle }
+        let chunks = ArticleSplitter.split(cleanText).enumerated().map { index, chunk in
+            ReadingChunk(id: UUID(), ordinal: index + 1, text: chunk)
+        }
+        let article = ReadingArticle(id: UUID(), title: cleanTitle, source: source,
+                                     originalText: cleanText, importedAt: .now, chunks: chunks)
+        data.articles.append(article)
+        do { try save() } catch { data.articles.removeAll { $0.id == article.id }; throw error }
+    }
+
+    func resegmentUnstudiedArticles() throws {
+        guard canWrite, !transferInProgress else { return }
+        let previousArticles = data.articles
+        var changed = false
+        for index in data.articles.indices {
+            let article = data.articles[index]
+            let hasReferences = data.readingRecords.contains { $0.articleID == article.id } ||
+                data.cards.contains { card in card.sources.contains { $0.materialID == article.id } } ||
+                data.writingExercises.contains { $0.sourceID == article.id } ||
+                article.chunks.contains { !($0.discussion ?? []).isEmpty }
+            guard !hasReferences else { continue }
+            let pieces = ArticleSplitter.split(article.originalText)
+            guard pieces != article.chunks.map(\.text) else { continue }
+            data.articles[index].chunks = pieces.enumerated().map { position, text in
+                ReadingChunk(id: UUID(), ordinal: position + 1, text: text)
+            }
+            changed = true
+        }
+        guard changed else { return }
+        do { try save() } catch { data.articles = previousArticles; throw error }
+    }
+
+    func completeReading(articleID: UUID, chunkID: UUID, difficulty: ReadingDifficulty,
+                         questions: [String], note: String) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        let record = ReadingRecord(id: UUID(), articleID: articleID, chunkID: chunkID,
+                                   completedAt: .now, difficulty: difficulty,
+                                   questions: questions, note: note)
+        let priorRecords = data.readingRecords
+        upsertReadingRecord(record)
+        do { try save() } catch { data.readingRecords = priorRecords; throw error }
+    }
+
+    private func upsertReadingRecord(_ record: ReadingRecord) {
+        data.readingRecords = Self.consolidatedReadingRecords(data.readingRecords + [record])
+    }
+
+    private static func consolidatedReadingRecords(_ records: [ReadingRecord]) -> [ReadingRecord] {
+        struct Key: Hashable { let articleID: UUID; let chunkID: UUID }
+        var result: [ReadingRecord] = []
+        var positions: [Key: Int] = [:]
+        for record in records {
+            let key = Key(articleID: record.articleID, chunkID: record.chunkID)
+            if let index = positions[key] {
+                var current = result[index]
+                current.questions = unique(current.questions + record.questions)
+                current.discussionIDs = unique((current.discussionIDs ?? []) + (record.discussionIDs ?? []))
+                current.cardIDs = unique((current.cardIDs ?? []) + (record.cardIDs ?? []))
+                if record.completedAt >= current.completedAt {
+                    current.completedAt = record.completedAt
+                    current.difficulty = record.difficulty
+                }
+                if !record.note.isEmpty && !current.note.components(separatedBy: "\n").contains(record.note) {
+                    current.note += current.note.isEmpty ? record.note : "\n" + record.note
+                }
+                result[index] = current
+            } else {
+                positions[key] = result.count
+                result.append(record)
+            }
+        }
+        return result
+    }
+
+    private static func unique<T: Hashable>(_ values: [T]) -> [T] {
+        var seen = Set<T>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    @discardableResult
+    func createAutomaticBackup(now: Date = .now) async throws -> URL? {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { return nil }
+        let hasContent = !data.audioMaterials.isEmpty || !data.articles.isEmpty ||
+            !data.readingRecords.isEmpty || !data.dictationAttempts.isEmpty ||
+            !data.writingExercises.isEmpty || !data.cards.isEmpty
+        guard hasContent else { return nil }
+        transferInProgress = true
+        defer { transferInProgress = false }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let directory = supportDirectory.deletingLastPathComponent()
+            .appendingPathComponent("SpanishLearningMac Backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("自动备份-\(formatter.string(from: now)).zip")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let payload = try encoder.encode(data)
+        let media = mediaDirectory
+        _ = try await Task.detached(priority: .utility) {
+            try BackupManager.create(database: payload, mediaDirectory: media, destination: destination)
+        }.value
+        let automatic = (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]))?.filter {
+                $0.lastPathComponent.hasPrefix("自动备份-") && $0.pathExtension.lowercased() == "zip"
+            }.sorted {
+                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhs > rhs
+            } ?? []
+        for old in automatic.dropFirst(14) { try? FileManager.default.removeItem(at: old) }
+        return destination
+    }
+
+    func createBackup(at destination: URL) async throws -> BackupSummary {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        transferInProgress = true
+        defer { transferInProgress = false }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let payload = try encoder.encode(data)
+        let media = mediaDirectory
+        return try await Task.detached(priority: .userInitiated) {
+            try BackupManager.create(database: payload, mediaDirectory: media, destination: destination)
+        }.value
+    }
+
+    func inspectBackup(at archive: URL) async throws -> BackupSummary {
+        guard !transferInProgress else { throw BackupError.busy }
+        transferInProgress = true
+        defer { transferInProgress = false }
+        return try await Task.detached(priority: .userInitiated) {
+            try BackupManager.inspect(archive)
+        }.value
+    }
+
+    func restoreBackup(at archive: URL) async throws -> URL? {
+        guard !transferInProgress else { throw BackupError.busy }
+        transferInProgress = true
+        defer { transferInProgress = false }
+        let directory = supportDirectory
+        let safety = try await Task.detached(priority: .userInitiated) {
+            try BackupManager.restore(archive, supportDirectory: directory)
+        }.value
+        let payload = try Data(contentsOf: databaseURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        data = try decoder.decode(StudyDatabase.self, from: payload)
+        canWrite = true
+        errorMessage = nil
+        return safety
+    }
+
+    private func save() throws {
+        guard canWrite else { throw StoreError.readOnly }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let payload = try encoder.encode(data)
+        try payload.write(to: databaseURL, options: .atomic)
+        objectWillChange.send()
+    }
+}
+
+enum StoreError: LocalizedError {
+    case unsupportedVersion
+    case emptyArticle
+    case readOnly
+    case missingMaterial
+    case missingSentence
+    case invalidSentence
+    case transcriptionLocked
+    case transcriptionIncomplete
+    case sentenceReferenced
+    case noSpeech
+    case missingCard
+    case cardConfirmed
+    case emptyCard
+    case unconfirmedCard
+    case invalidReviewGrade
+    case emptyWriting
+    case missingWritingExercise
+    case missingReadingChunk
+    case emptyReadingQuestion
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedVersion: "资料格式比当前应用更新，请使用新版应用打开。"
+        case .emptyArticle: "请输入文章标题和正文。"
+        case .readOnly: "资料读取失败，当前会话只读。请先修复或备份原始资料文件。"
+        case .missingMaterial: "找不到这段音频。"
+        case .missingSentence: "找不到这句话。"
+        case .invalidSentence: "请检查句子文本和起止时间。"
+        case .transcriptionLocked: "已有听写记录，不能重新覆盖整份转写。你仍可逐句修正。"
+        case .transcriptionIncomplete: "请等整段音频转写完成后再确认。"
+        case .sentenceReferenced: "这句话已有听写或卡片记录，不能改变切句。仍可修改文字和时间。"
+        case .noSpeech: "这段音频没有识别出西语语音。请检查音频后重试。"
+        case .missingCard: "找不到这张卡片。"
+        case .cardConfirmed: "已确认的卡片不能再作为草稿修改。"
+        case .emptyCard: "卡片问题和答案都不能为空。"
+        case .unconfirmedCard: "请先确认卡片，再开始复习。"
+        case .invalidReviewGrade: "无法识别这次复习评分。"
+        case .emptyWriting: "请先准备中文题目并写下西语答案。"
+        case .missingWritingExercise: "找不到这道写作练习。"
+        case .missingReadingChunk: "找不到当前文章段落。"
+        case .emptyReadingQuestion: "请先写下精读问题。"
+        }
+    }
+}
+
+enum ArticleSplitter {
+    static func split(_ text: String, targetWords: Int = 50) -> [String] {
+        let sentenceRegex = try! NSRegularExpression(pattern: #"[^.!?。！？]+[.!?。！？]*"#)
+        let clauseRegex = try! NSRegularExpression(pattern: #"[^,;:，；：]+[,;:，；：]*"#)
+        let range = NSRange(text.startIndex..., in: text)
+        let sentences = sentenceRegex.matches(in: text, range: range).compactMap { match -> String? in
+            guard let matchRange = Range(match.range, in: text) else { return nil }
+            let sentence = text[matchRange].trimmingCharacters(in: .whitespacesAndNewlines)
+            return sentence.isEmpty ? nil : String(sentence)
+        }
+
+        var units: [String] = []
+        for sentence in sentences {
+            let words = sentence.split(whereSeparator: { $0.isWhitespace })
+            guard words.count > targetWords else {
+                units.append(sentence)
+                continue
+            }
+            let clauseRange = NSRange(sentence.startIndex..., in: sentence)
+            for match in clauseRegex.matches(in: sentence, range: clauseRange) {
+                guard let matchRange = Range(match.range, in: sentence) else { continue }
+                let clause = sentence[matchRange].trimmingCharacters(in: .whitespacesAndNewlines)
+                let clauseWords = clause.split(whereSeparator: { $0.isWhitespace })
+                guard !clauseWords.isEmpty else { continue }
+                if clauseWords.count <= targetWords {
+                    units.append(String(clause))
+                } else {
+                    for start in stride(from: 0, to: clauseWords.count, by: targetWords) {
+                        units.append(clauseWords[start..<min(start + targetWords, clauseWords.count)]
+                            .joined(separator: " "))
+                    }
+                }
+            }
+        }
+
+        var chunks: [String] = []
+        var current: [String] = []
+        var count = 0
+        for unit in units {
+            let words = unit.split(whereSeparator: { $0.isWhitespace }).count
+            if !current.isEmpty && count + words > targetWords {
+                chunks.append(current.joined(separator: " "))
+                current.removeAll()
+                count = 0
+            }
+            current.append(unit)
+            count += words
+        }
+        if !current.isEmpty { chunks.append(current.joined(separator: " ")) }
+        return chunks.isEmpty ? [text] : chunks
+    }
+}

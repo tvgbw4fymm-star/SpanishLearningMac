@@ -1,0 +1,5 @@
+swift-fsrs
+Repository: https://github.com/open-spaced-repetition/swift-fsrs
+Vendored commit: 4fbaf20184d62f82a9f44f343337c61a2c5483e9
+Purpose: FSRS-6 spaced-repetition scheduling
+License: MIT (see swift-fsrs-LICENSE.txt)
