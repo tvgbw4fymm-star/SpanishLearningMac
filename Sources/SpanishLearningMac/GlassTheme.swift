@@ -182,6 +182,8 @@ struct AppActionButtonStyle: ButtonStyle {
     }
 }
 
+typealias SecondaryPlaybackButtonStyle = AppActionButtonStyle
+
 struct FloatingStudyButton: View {
     let action: () -> Void
     @State private var hovering = false

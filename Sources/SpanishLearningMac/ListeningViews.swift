@@ -17,7 +17,8 @@ struct ListeningView: View {
     @State private var showReview = false
     @State private var status: String?
     @State private var learningPoints: [LearningPointRequest] = ListeningView.defaultPoints()
-    @State private var aiWorking = false
+    @State private var isAnalyzingListening = false
+    @State private var isGeneratingCards = false
     @State private var showPasteSubtitles = false
 
     private var material: AudioMaterial? {
@@ -154,11 +155,20 @@ struct ListeningView: View {
                                         togglePlayback(material: material, sentence: sentence)
                                     }
                                     .buttonStyle(AppActionButtonStyle(prominent: true))
+                                    Button("下一句") {
+                                        persistDraft()
+                                        nextSentence(material, sentence)
+                                    }
+                                    .buttonStyle(SecondaryPlaybackButtonStyle())
+                                    .disabled(sentence.ordinal >= material.sentences.count)
                                     Button("后退 2 秒", systemImage: "gobackward.2") { seek(sentence: sentence, by: -2) }
+                                        .buttonStyle(SecondaryPlaybackButtonStyle())
                                         .disabled(player == nil || playbackSentenceID != sentence.id)
                                     Button("前进 2 秒", systemImage: "goforward.2") { seek(sentence: sentence, by: 2) }
+                                        .buttonStyle(SecondaryPlaybackButtonStyle())
                                         .disabled(player == nil || playbackSentenceID != sentence.id)
                                     Button("重听", systemImage: "arrow.clockwise") { play(material: material, sentence: sentence) }
+                                        .buttonStyle(SecondaryPlaybackButtonStyle())
                                 }
                                 Text("你听到了什么？").font(AppType.ui(14, weight: .semibold))
                                 TextEditor(text: $draft)
@@ -179,36 +189,68 @@ struct ListeningView: View {
                                     Button("再听，再写同一句", systemImage: "arrow.counterclockwise") {
                                         retry(material, sentence)
                                     }
-                                    if let analysis = sentence.analysis {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            Text("AI 听辨提示").font(AppType.ui(14, weight: .semibold))
-                                            Text(analysis.explanation).textSelection(.enabled)
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        if let analysis = sentence.analysis {
+                                            Text("AI 听力分析").font(AppType.ui(14, weight: .semibold))
+                                            if !analysis.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                                Text(analysis.explanation).textSelection(.enabled)
+                                            }
+                                            ForEach(analysis.items ?? []) { item in
+                                                VStack(alignment: .leading, spacing: 4) {
+                                                    Text(analysisTitle(for: item.category))
+                                                        .font(AppType.ui(12, weight: .semibold))
+                                                    Text(item.title).font(AppType.ui(13, weight: .semibold))
+                                                    Text(item.detail).textSelection(.enabled)
+                                                    if let evidence = item.evidence, !evidence.isEmpty {
+                                                        Text("依据：\(evidence)")
+                                                            .font(AppType.ui(12))
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                }
+                                                .padding(.top, 4)
+                                            }
                                             if let count = sentence.learningPoints?.count, count > 0 {
                                                 Text("已生成 \(count) 张卡片草稿，可到“卡片”中检查。")
                                                     .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
                                             }
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(16)
-                                        .background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
-                                    } else {
-                                        LearningPointsEditor(points: $learningPoints)
-                                        HStack {
-                                            Button("不制卡，下一句") { nextSentence(material, sentence) }
-                                                .disabled(sentence.ordinal >= material.sentences.count || aiWorking)
-                                            Spacer()
-                                            if aiWorking { ProgressView().controlSize(.small) }
-                                            Button("解释并生成卡片草稿 → 下一句") {
-                                                generateStudyResult(material, sentence)
+                                            HStack {
+                                                Spacer()
+                                                if isAnalyzingListening { ProgressView().controlSize(.small) }
+                                                Button("重新分析", systemImage: "arrow.clockwise") {
+                                                    analyzeListening(material, sentence)
+                                                }
+                                                .buttonStyle(.borderless)
+                                                .disabled(isAnalyzingListening)
                                             }
-                                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                                            .disabled(aiWorking)
+                                        } else {
+                                            HStack {
+                                                Text("先分析这句为什么不容易听懂，再决定要积累什么。")
+                                                    .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+                                                Spacer()
+                                                if isAnalyzingListening { ProgressView().controlSize(.small) }
+                                                Button("AI 听力分析", systemImage: "waveform.and.magnifyingglass") {
+                                                    analyzeListening(material, sentence)
+                                                }
+                                                .buttonStyle(AppActionButtonStyle(prominent: true))
+                                                .disabled(isAnalyzingListening)
+                                            }
                                         }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(16)
+                                    .background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                                    LearningPointsEditor(points: $learningPoints)
+                                    HStack {
+                                        Spacer()
+                                        if isGeneratingCards { ProgressView().controlSize(.small) }
+                                        Button("生成卡片草稿") {
+                                            generateListeningCards(material, sentence)
+                                        }
+                                        .buttonStyle(AppActionButtonStyle(prominent: true))
+                                        .disabled(isGeneratingCards)
                                     }
                                 } else {
                                     HStack {
-                                        Text("可以反复修改，准备好后再看答案。")
-                                            .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
                                         Spacer()
                                         Button("看答案") { reveal(material, sentence) }
                                             .buttonStyle(AppActionButtonStyle(prominent: true))
@@ -255,7 +297,30 @@ struct ListeningView: View {
         }
     }
 
-    private func generateStudyResult(_ material: AudioMaterial, _ sentence: ListeningSentence) {
+    private func analyzeListening(_ material: AudioMaterial, _ sentence: ListeningSentence) {
+        let key: String
+        do { key = try AIProviderSettings.textKey() ?? "" }
+        catch { status = error.localizedDescription; return }
+        guard !key.isEmpty else { status = AIProviderError.missingKey.localizedDescription; return }
+        isAnalyzingListening = true
+        status = "AI 正在分析听辨困难…"
+        Task {
+            do {
+                let result = try await AIStudyService.analyzeListening(
+                    transcript: sentence.transcript, attempt: draft, apiKey: key
+                )
+                try store.saveListeningAnalysis(materialID: material.id, sentenceID: sentence.id,
+                                                attempt: draft, result: result)
+                status = "听力分析已保存。"
+                isAnalyzingListening = false
+            } catch {
+                status = error.localizedDescription
+                isAnalyzingListening = false
+            }
+        }
+    }
+
+    private func generateListeningCards(_ material: AudioMaterial, _ sentence: ListeningSentence) {
         let filled = learningPoints.compactMap { point -> LearningPointRequest? in
             let text = point.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
@@ -265,23 +330,37 @@ struct ListeningView: View {
         do { key = try AIProviderSettings.textKey() ?? "" }
         catch { status = error.localizedDescription; return }
         guard !key.isEmpty else { status = AIProviderError.missingKey.localizedDescription; return }
-        aiWorking = true
-        status = "AI 正在解释并整理卡片草稿…"
-        let attempt = draft
+        guard !filled.isEmpty else {
+            status = "请先填写至少一个积累要点。"
+            return
+        }
+        isGeneratingCards = true
+        status = "AI 正在生成卡片草稿…"
         Task {
             do {
-                let result = try await AIStudyService.explainListening(transcript: sentence.transcript,
-                                                                      attempt: attempt,
-                                                                      points: filled, apiKey: key)
-                try store.saveListeningAIResult(materialID: material.id, sentenceID: sentence.id,
-                                                attempt: attempt, points: filled, result: result)
-                status = filled.isEmpty ? "听辨提示已保存。" : "听辨提示和 \(filled.count) 张卡片草稿已保存。"
-                aiWorking = false
-                nextSentence(material, sentence)
+                let result = try await AIStudyService.generateListeningCards(
+                    transcript: sentence.transcript, points: filled, apiKey: key
+                )
+                try store.saveListeningCards(materialID: material.id, sentenceID: sentence.id,
+                                             points: filled, result: result)
+                status = "\(filled.count) 张卡片草稿已保存。"
+                isGeneratingCards = false
             } catch {
                 status = error.localizedDescription
-                aiWorking = false
+                isGeneratingCards = false
             }
+        }
+    }
+
+    private func analysisTitle(for category: ListeningAnalysisCategory) -> String {
+        switch category {
+        case .difficulty: "🎧 听辨难点"
+        case .connectedSpeech: "🔗 连读 / 语流连接"
+        case .reduction: "🔉 弱读 / 吞音 / 省音"
+        case .accent: "🗣 口音特点"
+        case .expression: "💬 口语表达"
+        case .vocabulary: "📚 词汇 / 搭配"
+        case .attemptDifference: "⚠️ 你的听写差异"
         }
     }
 
@@ -476,21 +555,26 @@ private struct LearningPointsEditor: View {
             Text("每个已填写的要点会分别生成一张草稿；空白项会被忽略。")
                 .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
             ForEach($points) { $point in
-                HStack(alignment: .top, spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
                     Picker("分类", selection: $point.category) {
                         ForEach(CardCategory.allCases) { category in Text(category.rawValue).tag(category) }
                     }
                     .labelsHidden()
                     .studyPickerChrome()
-                    .frame(width: 150)
+                    .frame(width: 150, alignment: .leading)
                     TextField(placeholder(for: point.category), text: $point.prompt, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Button(role: .destructive) {
                         points.removeAll { $0.id == point.id }
-                    } label: { Image(systemName: "xmark") }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 28, height: 28)
+                    }
                     .buttonStyle(.plain)
-                    .padding(.top, 7)
+                    .frame(width: 32)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Button("新增要点", systemImage: "plus") {
                 points.append(LearningPointRequest(id: UUID(), category: .expression, prompt: ""))
@@ -975,4 +1059,3 @@ private func formatTime(_ seconds: Double) -> String {
     let safe = max(0, Int(seconds.rounded()))
     return String(format: "%02d:%02d", safe / 60, safe % 60)
 }
-

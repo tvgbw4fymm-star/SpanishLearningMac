@@ -77,15 +77,74 @@ struct ModelSmoke {
         try firstStore.revealAnswer(materialID: audioID, sentenceID: sentenceID, text: "Hola como estas")
         let pointID = UUID()
         let point = LearningPointRequest(id: pointID, category: .expression, prompt: "礼貌问候")
-        let aiResult = ListeningAIResult(explanation: "可能没有识别疑问语调。",
-                                         cards: [.init(requestID: pointID.uuidString,
-                                                       category: .expression,
-                                                       mergeKey: "表达|cómo estás|问候",
-                                                       question: "如何自然问候？",
-                                                       answer: "使用 ¿Cómo estás?。")])
-        try firstStore.saveListeningAIResult(materialID: audioID, sentenceID: sentenceID,
-                                             attempt: "Hola como estas", points: [point], result: aiResult)
+        let analysisResult = ListeningAnalysisResult(
+            explanation: "可能没有识别疑问语调。",
+            items: [.init(category: .attemptDifference, title: "听写差异",
+                          detail: "你漏写了疑问结构。", evidence: "原句与听写对比")]
+        )
+        try firstStore.saveListeningAnalysis(materialID: audioID, sentenceID: sentenceID,
+                                             attempt: "Hola como estas", result: analysisResult)
+        precondition(firstStore.data.cards.isEmpty)
+        let cardsResult = ListeningCardsResult(cards: [
+            .init(requestID: pointID.uuidString,
+                  category: .expression,
+                  mergeKey: "表达|cómo estás|问候",
+                  question: "如何自然问候？",
+                  answer: "使用 ¿Cómo estás?。")
+        ])
+        try firstStore.saveListeningCards(materialID: audioID, sentenceID: sentenceID,
+                                          points: [point], result: cardsResult)
         precondition(firstStore.data.cards.count == 1)
+        precondition(firstStore.data.audioMaterials[0].sentences.first(where: { $0.id == sentenceID })?.analysis?.explanation == "可能没有识别疑问语调。")
+        precondition(firstStore.data.audioMaterials[0].sentences.first(where: { $0.id == sentenceID })?.analysis?.items?.count == 1)
+        let replacementAnalysis = ListeningAnalysisResult(
+            explanation: "重新分析后的听辨困难。",
+            items: [.init(category: .difficulty, title: "词边界", detail: "边界不明显。", evidence: nil)]
+        )
+        try firstStore.saveListeningAnalysis(materialID: audioID, sentenceID: sentenceID,
+                                             attempt: "lluvia", result: replacementAnalysis)
+        let replacedSentence = firstStore.data.audioMaterials[0].sentences.first(where: { $0.id == sentenceID })
+        precondition(replacedSentence?.analysis?.explanation == "重新分析后的听辨困难。")
+        precondition(firstStore.data.cards.count == 1, "Replacing analysis must not alter cards")
+        let reopenedStore = StudyStore(baseDirectory: testDirectory)
+        let restoredAnalysis = reopenedStore.data.audioMaterials[0].sentences.first(where: { $0.id == sentenceID })?.analysis
+        precondition(restoredAnalysis?.items?.first?.category == .difficulty)
+        let legacyAnalysis = """
+        {"userAttemptSnapshot":"Hola","explanation":"旧格式","generatedAt":"2026-01-01T00:00:00Z"}
+        """
+        let legacyDecoded = try decoder.decode(ListeningAnalysis.self, from: Data(legacyAnalysis.utf8))
+        precondition(legacyDecoded.items == nil && legacyDecoded.explanation == "旧格式")
+        let listeningSchema = AIStudyService.listeningAnalysisSchema
+        assertStrictObjectsHaveMatchingRequiredProperties(listeningSchema)
+        let cardsSchema = AIStudyService.listeningCardsSchema()
+        assertStrictObjectsHaveMatchingRequiredProperties(cardsSchema)
+        let analysisCategories = (((listeningSchema["properties"] as! [String: Any])["items"] as! [String: Any])["items"] as! [String: Any])["properties"] as! [String: Any]
+        let categoryValues = ((analysisCategories["category"] as! [String: Any])["enum"] as! [String])
+        precondition(!categoryValues.contains("expression") && !categoryValues.contains("vocabulary"))
+        let schemaData = try JSONSerialization.data(withJSONObject: listeningSchema)
+        let schemaObject = try JSONSerialization.jsonObject(with: schemaData) as! [String: Any]
+        let itemSchema = (((schemaObject["properties"] as! [String: Any])["items"] as! [String: Any])["items"] as! [String: Any])
+        let evidenceSchema = (itemSchema["properties"] as! [String: Any])["evidence"] as! [String: Any]
+        precondition((evidenceSchema["type"] as? [String]) == ["string", "null"])
+        let nullEvidence = """
+        {"explanation":"分析","items":[{"category":"difficulty","title":"难点","detail":"语流较快","evidence":null}],"cards":[]}
+        """
+        let stringEvidence = """
+        {"explanation":"分析","items":[{"category":"difficulty","title":"难点","detail":"语流较快","evidence":"原句片段"}],"cards":[]}
+        """
+        let decodedNullEvidence = try decoder.decode(ListeningAnalysisResult.self, from: Data(nullEvidence.utf8))
+        let decodedStringEvidence = try decoder.decode(ListeningAnalysisResult.self, from: Data(stringEvidence.utf8))
+        precondition(decodedNullEvidence.items.first?.evidence == nil)
+        precondition(decodedStringEvidence.items.first?.evidence == "原句片段")
+        let emptyItems = ListeningAnalysisResult(explanation: "无结构化重点", items: [])
+        precondition(emptyItems.items.isEmpty)
+        let invalidResult = ListeningCardsResult(cards: [])
+        do {
+            try firstStore.saveListeningCards(materialID: audioID, sentenceID: secondSentenceID,
+                                              points: [point], result: invalidResult)
+            preconditionFailure("An incomplete AI card response was accepted")
+        } catch AIStudyError.invalidResponse { }
+        precondition(firstStore.data.audioMaterials[0].sentences.first(where: { $0.id == secondSentenceID })?.analysis == nil)
         let draftCardID = firstStore.data.cards[0].id
         try firstStore.updateCardDraft(draftCardID, category: .expression,
                                        question: "如何问候熟人？", answer: "可以说 ¿Cómo estás?")
@@ -106,14 +165,15 @@ struct ModelSmoke {
         // append the new source, and preserve its accumulated review state.
         let repeatedPointID = UUID()
         let repeatedPoint = LearningPointRequest(id: repeatedPointID, category: .expression, prompt: "礼貌问候的另一处出现")
-        let repeatedResult = ListeningAIResult(explanation: "同一表达再次出现。",
-                                                cards: [.init(requestID: repeatedPointID.uuidString,
-                                                              category: .expression,
-                                                              mergeKey: "表达|COMO ESTAS|问候",
-                                                              question: "这次问候怎么理解？",
-                                                              answer: "同一表达的新来源。")])
-        try firstStore.saveListeningAIResult(materialID: audioID, sentenceID: secondSentenceID,
-                                             attempt: "", points: [repeatedPoint], result: repeatedResult)
+        let repeatedResult = ListeningCardsResult(cards: [
+            .init(requestID: repeatedPointID.uuidString,
+                  category: .expression,
+                  mergeKey: "表达|COMO ESTAS|问候",
+                  question: "这次问候怎么理解？",
+                  answer: "同一表达的新来源。")
+        ])
+        try firstStore.saveListeningCards(materialID: audioID, sentenceID: secondSentenceID,
+                                          points: [repeatedPoint], result: repeatedResult)
         precondition(firstStore.data.cards.count == 1, "Semantic duplicate created a second card")
         precondition(firstStore.data.cards[0].sources.count == 2, "Merged card lost a source")
         precondition(firstStore.data.cards[0].dueAt == reviewedDue && firstStore.data.cards[0].fsrsState?.reps == reviewedState?.reps,
@@ -327,5 +387,25 @@ struct ModelSmoke {
                          "Failed restore modified the current library")
         }
         print("Model smoke passed: reading chat, writing versions, card merging, FSRS and automatic backup")
+    }
+
+    private static func assertStrictObjectsHaveMatchingRequiredProperties(_ schema: [String: Any]) {
+        guard schema["type"] as? String == "object" else { return }
+        let properties = schema["properties"] as? [String: Any] ?? [:]
+        let required = Set(schema["required"] as? [String] ?? [])
+        precondition(Set(properties.keys) == required, "Strict object required/properties mismatch")
+        for value in properties.values {
+            inspectSchemaValue(value)
+        }
+    }
+
+    private static func inspectSchemaValue(_ value: Any) {
+        guard let schema = value as? [String: Any] else { return }
+        if schema["type"] as? String == "object" {
+            assertStrictObjectsHaveMatchingRequiredProperties(schema)
+        }
+        if let items = schema["items"] as? [String: Any] {
+            inspectSchemaValue(items)
+        }
     }
 }

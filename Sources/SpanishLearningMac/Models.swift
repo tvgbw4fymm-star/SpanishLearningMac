@@ -28,7 +28,26 @@ enum TranscriptStatus: String, Codable {
 struct ListeningAnalysis: Codable {
     var userAttemptSnapshot: String
     var explanation: String
+    var items: [ListeningAnalysisItem]? = nil
     var generatedAt: Date
+}
+
+enum ListeningAnalysisCategory: String, Codable {
+    case difficulty
+    case connectedSpeech
+    case reduction
+    case accent
+    case expression
+    case vocabulary
+    case attemptDifference
+}
+
+struct ListeningAnalysisItem: Codable, Identifiable {
+    var id: UUID
+    var category: ListeningAnalysisCategory
+    var title: String
+    var detail: String
+    var evidence: String?
 }
 
 struct ListeningLearningPoint: Codable, Identifiable {

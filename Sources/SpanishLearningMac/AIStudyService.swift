@@ -6,7 +6,19 @@ struct LearningPointRequest: Identifiable, Sendable {
     var prompt: String
 }
 
-struct ListeningAIResult: Decodable, Sendable {
+struct ListeningAnalysisResult: Decodable, Sendable {
+    struct Item: Decodable, Sendable {
+        let category: ListeningAnalysisCategory
+        let title: String
+        let detail: String
+        let evidence: String?
+    }
+
+    let explanation: String
+    let items: [Item]
+}
+
+struct ListeningCardsResult: Decodable, Sendable {
     struct Card: Decodable, Sendable {
         let requestID: String
         let category: CardCategory
@@ -14,8 +26,11 @@ struct ListeningAIResult: Decodable, Sendable {
         let question: String
         let answer: String
     }
-    let explanation: String
     let cards: [Card]
+
+    init(cards: [Card]) {
+        self.cards = cards
+    }
 }
 
 private struct ResponsesEnvelope: Decodable {
@@ -46,27 +61,83 @@ enum AIStudyError: LocalizedError {
 }
 
 enum AIStudyService {
-    static func explainListening(transcript: String, attempt: String,
-                                 points: [LearningPointRequest], apiKey: String) async throws -> ListeningAIResult {
-        let requested = points.map { "- ID=\($0.id.uuidString) [\($0.category.rawValue)] \($0.prompt)" }.joined(separator: "\n")
+    static func analyzeListening(transcript: String, attempt: String,
+                                 apiKey: String) async throws -> ListeningAnalysisResult {
         let input = """
         西语原句：\(transcript)
         学习者听写：\(attempt.isEmpty ? "（空白）" : attempt)
-        学习者希望积累的要点：
-        \(requested.isEmpty ? "（没有指定要点；只解释听写困难）" : requested)
+        材料口音或地区上下文：未提供；不得仅凭这句话断言具体口音
         """
-        let categories = CardCategory.allCases.map(\.rawValue)
-        let schema: [String: Any] = [
+        return try await AITextClient.request(
+            input: input,
+            instructions: listeningInstructions,
+            schemaName: "listening_analysis",
+            schema: listeningAnalysisSchema,
+            apiKey: apiKey,
+            result: ListeningAnalysisResult.self
+        )
+    }
+
+    static func generateListeningCards(transcript: String,
+                                       points: [LearningPointRequest],
+                                       apiKey: String) async throws -> ListeningCardsResult {
+        let requested = points.map { "- ID=\($0.id.uuidString) [\($0.category.rawValue)] \($0.prompt)" }.joined(separator: "\n")
+        let input = """
+        西语原句：\(transcript)
+        用户手工填写的积累要点：
+        \(requested.isEmpty ? "（没有填写任何要点）" : requested)
+        """
+        let result = try await AITextClient.request(
+            input: input,
+            instructions: listeningCardsInstructions,
+            schemaName: "listening_cards",
+            schema: listeningCardsSchema(),
+            apiKey: apiKey,
+            result: ListeningCardsResult.self
+        )
+        let requestedIDs = Set(points.map { $0.id.uuidString })
+        let returnedIDs = Set(result.cards.map { $0.requestID })
+        guard requestedIDs == returnedIDs, result.cards.count == points.count else {
+            throw AIStudyError.invalidResponse
+        }
+        return result
+    }
+
+    static let listeningAnalysisSchema: [String: Any] = [
             "type": "object",
             "properties": [
                 "explanation": ["type": "string", "description": "简洁解释学习者可能没有听出的原因，包括可能的连读、弱读、口音、音素混淆或词组识别。没有音频证据时明确使用可能、通常等措辞。"],
+                "items": [
+                    "type": "array",
+                    "description": "只返回真正有证据且对当前句有帮助的听力分析，不要机械填满类别。",
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "category": ["type": "string", "enum": ["difficulty", "connectedSpeech", "reduction", "accent", "attemptDifference"]],
+                            "title": ["type": "string"],
+                            "detail": ["type": "string"],
+                            "evidence": ["type": ["string", "null"]]
+                        ],
+                        "required": ["category", "title", "detail", "evidence"],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "required": ["explanation", "items"],
+            "additionalProperties": false
+        ]
+
+    static func listeningCardsSchema(cardCategories: [String] = CardCategory.allCases.map(\.rawValue)) -> [String: Any] {
+        [
+            "type": "object",
+            "properties": [
                 "cards": [
                     "type": "array",
                     "items": [
                         "type": "object",
                         "properties": [
                             "requestID": ["type": "string", "description": "复制对应要点的 ID"],
-                            "category": ["type": "string", "enum": categories],
+                            "category": ["type": "string", "enum": cardCategories],
                             "mergeKey": ["type": "string", "description": "稳定的语义键：分类|西语词元、结构或知识主题|具体义项。相同内容必须复用；同一词不同义项必须不同。"],
                             "question": ["type": "string"],
                             "answer": ["type": "string"]
@@ -76,22 +147,18 @@ enum AIStudyService {
                     ]
                 ]
             ],
-            "required": ["explanation", "cards"],
+            "required": ["cards"],
             "additionalProperties": false
         ]
-        let instructions = """
-        你是严谨的西班牙语教师。用中文回答。先比较听写与原句，简洁解释可能的听辨困难；不能假装听过未提供的音频。随后严格按用户实际填写的每个要点生成一张详细学习卡，原样复制该要点的 ID 到 requestID，不自行增加低价值卡片。卡片问题简洁，答案适合以后复习。遇到动词时，先说明其本质语义，再解释原句中的具体作用，并给出一到两个不同语境的西语例句及中文说明。固定搭配、语法、文化知识分别放入最合适的分类。文化或事实性问题只解释稳定知识，不编造实时信息。每张卡必须生成稳定的 mergeKey，格式为“分类|规范化西语词元、结构或知识主题|具体义项”；同一内容即使提问措辞不同也复用同一个键，同一单词的不同义项必须使用不同键。
-        """
-        let result = try await AITextClient.request(input: input, instructions: instructions,
-                                                     schemaName: "listening_study_result", schema: schema,
-                                                     apiKey: apiKey, result: ListeningAIResult.self)
-        let requestedIDs = Set(points.map { $0.id.uuidString })
-        let returnedIDs = Set(result.cards.map(\.requestID))
-        guard requestedIDs == returnedIDs, result.cards.count == points.count else {
-            throw AIStudyError.invalidResponse
-        }
-        return result
     }
+
+    private static let listeningInstructions = """
+        你是严谨的西班牙语听力教师。只分析这句话为什么在真实听力中不容易听懂，不做普通词汇、语法或表达教学。重点关注连读、音节连接、弱读、吞音、省音、自然语流音变、单词边界、音素混淆、语速节奏、明确上下文支持的口音听辨特点，以及学习者听写与原句的差异。你没有真正听到音频，不能假装听过；只能根据原句、听写和文字上下文作有依据的分析。不确定时使用“可能”“通常”“这里可能”等措辞。材料口音或地区上下文未提供时，不得断言具体口音。只返回确实与听辨直接相关且有价值的 items，不要返回普通词汇知识、普通语法知识、固定搭配、值得积累的表达或制卡建议。
+        """
+
+    private static let listeningCardsInstructions = """
+        你是严谨的西班牙语学习卡片教师。只根据用户手工填写的积累要点，为每个要点生成一张学习卡。不要分析听辨困难，不要生成或修改 Listening analysis，不要自行增加用户没有填写的学习点。原样复制每个要点的 ID 到 requestID，每个要点必须且只能对应一张卡。卡片问题简洁，答案适合以后复习。遇到动词时，先说明本质语义，再解释原句中的具体作用，并给出一到两个不同语境的西语例句及中文说明。每张卡必须生成稳定的 mergeKey。
+        """
 
 }
 

@@ -274,8 +274,29 @@ final class StudyStore: ObservableObject {
         }
     }
 
-    func saveListeningAIResult(materialID: UUID, sentenceID: UUID, attempt: String,
-                               points: [LearningPointRequest], result: ListeningAIResult) throws {
+    func saveListeningAnalysis(materialID: UUID, sentenceID: UUID, attempt: String,
+                                result: ListeningAnalysisResult) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
+        let previous = data.audioMaterials[m].sentences[s]
+        data.audioMaterials[m].sentences[s].analysis = ListeningAnalysis(
+            userAttemptSnapshot: attempt,
+            explanation: result.explanation,
+            items: result.items.map {
+                ListeningAnalysisItem(id: UUID(), category: $0.category,
+                                      title: $0.title, detail: $0.detail, evidence: $0.evidence)
+            },
+            generatedAt: .now
+        )
+        do { try save() } catch {
+            data.audioMaterials[m].sentences[s] = previous
+            throw error
+        }
+    }
+
+    func saveListeningCards(materialID: UUID, sentenceID: UUID,
+                            points: [LearningPointRequest], result: ListeningCardsResult) throws {
         guard canWrite else { throw StoreError.readOnly }
         guard !transferInProgress else { throw BackupError.busy }
         guard let (m, s) = sentenceLocation(materialID: materialID, sentenceID: sentenceID) else { throw StoreError.missingSentence }
@@ -322,9 +343,6 @@ final class StudyStore: ObservableObject {
             links.append(ListeningLearningPoint(id: point.id, category: generated.category,
                                                 prompt: point.prompt, cardID: cardID))
         }
-        data.audioMaterials[m].sentences[s].analysis = ListeningAnalysis(userAttemptSnapshot: attempt,
-                                                                         explanation: result.explanation,
-                                                                         generatedAt: .now)
         data.audioMaterials[m].sentences[s].learningPoints = links
         do { try save() } catch {
             data.audioMaterials[m].sentences[s] = priorSentence
