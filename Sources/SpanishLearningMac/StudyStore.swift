@@ -893,54 +893,95 @@ enum StoreError: LocalizedError {
 }
 
 enum ArticleSplitter {
-    static func split(_ text: String, targetWords: Int = 50) -> [String] {
-        let sentenceRegex = try! NSRegularExpression(pattern: #"[^.!?。！？]+[.!?。！？]*"#)
-        let clauseRegex = try! NSRegularExpression(pattern: #"[^,;:，；：]+[,;:，；：]*"#)
-        let range = NSRange(text.startIndex..., in: text)
-        let sentences = sentenceRegex.matches(in: text, range: range).compactMap { match -> String? in
-            guard let matchRange = Range(match.range, in: text) else { return nil }
-            let sentence = text[matchRange].trimmingCharacters(in: .whitespacesAndNewlines)
-            return sentence.isEmpty ? nil : String(sentence)
-        }
+    private struct Sentence {
+        let text: String
+        let wordCount: Int
+        var endsParagraph: Bool
+    }
 
-        var units: [String] = []
-        for sentence in sentences {
-            let words = sentence.split(whereSeparator: { $0.isWhitespace })
-            guard words.count > targetWords else {
-                units.append(sentence)
-                continue
-            }
-            let clauseRange = NSRange(sentence.startIndex..., in: sentence)
-            for match in clauseRegex.matches(in: sentence, range: clauseRange) {
-                guard let matchRange = Range(match.range, in: sentence) else { continue }
-                let clause = sentence[matchRange].trimmingCharacters(in: .whitespacesAndNewlines)
-                let clauseWords = clause.split(whereSeparator: { $0.isWhitespace })
-                guard !clauseWords.isEmpty else { continue }
-                if clauseWords.count <= targetWords {
-                    units.append(String(clause))
+    static func split(_ text: String, targetWords: Int = 100) -> [String] {
+        let paragraphs = text.components(separatedBy: .newlines)
+            .reduce(into: [(text: String, endsParagraph: Bool)]()) { result, line in
+                let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty else {
+                    if !result.isEmpty { result[result.count - 1].endsParagraph = true }
+                    return
+                }
+                if let last = result.last, !last.endsParagraph {
+                    result[result.count - 1].text += " " + value
                 } else {
-                    for start in stride(from: 0, to: clauseWords.count, by: targetWords) {
-                        units.append(clauseWords[start..<min(start + targetWords, clauseWords.count)]
-                            .joined(separator: " "))
-                    }
+                    result.append((value, false))
                 }
             }
-        }
+        let sentences = paragraphs.flatMap { sentenceParts(in: $0.text, endsParagraph: $0.endsParagraph) }
+        guard !sentences.isEmpty else { return [text] }
 
-        var chunks: [String] = []
-        var current: [String] = []
-        var count = 0
-        for unit in units {
-            let words = unit.split(whereSeparator: { $0.isWhitespace }).count
-            if !current.isEmpty && count + words > targetWords {
-                chunks.append(current.joined(separator: " "))
-                current.removeAll()
-                count = 0
+        var chunks: [[Sentence]] = []
+        var current: [Sentence] = []
+        var currentWords = 0
+        for sentence in sentences {
+            let combinedWords = currentWords + sentence.wordCount
+            let shouldCutBefore = !current.isEmpty &&
+                (current.last?.endsParagraph == true ||
+                 abs(currentWords - targetWords) <= abs(combinedWords - targetWords))
+            if shouldCutBefore {
+                chunks.append(current)
+                current = []
+                currentWords = 0
             }
-            current.append(unit)
-            count += words
+            current.append(sentence)
+            currentWords += sentence.wordCount
         }
-        if !current.isEmpty { chunks.append(current.joined(separator: " ")) }
-        return chunks.isEmpty ? [text] : chunks
+        if !current.isEmpty { chunks.append(current) }
+
+        return chunks.map { $0.map(\.text).joined(separator: " ") }
+    }
+
+    private static func sentenceParts(in paragraph: String, endsParagraph: Bool) -> [Sentence] {
+        var result: [Sentence] = []
+        var start = paragraph.startIndex
+        var index = start
+        while index < paragraph.endIndex {
+            let character = paragraph[index]
+            guard ".!?。！？".contains(character) else {
+                index = paragraph.index(after: index)
+                continue
+            }
+            var end = paragraph.index(after: index)
+            while end < paragraph.endIndex && "!?。！？".contains(paragraph[end]) {
+                end = paragraph.index(after: end)
+            }
+            if character == "." && !isSentencePeriod(paragraph, at: index) {
+                index = end
+                continue
+            }
+            let value = paragraph[start..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                result.append(Sentence(text: String(value),
+                                       wordCount: value.split(whereSeparator: \.isWhitespace).count,
+                                       endsParagraph: false))
+            }
+            start = end
+            index = end
+        }
+        let tail = paragraph[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty {
+            result.append(Sentence(text: String(tail),
+                                   wordCount: tail.split(whereSeparator: \.isWhitespace).count,
+                                   endsParagraph: false))
+        }
+        if let last = result.indices.last { result[last].endsParagraph = endsParagraph }
+        return result
+    }
+
+    private static func isSentencePeriod(_ text: String, at index: String.Index) -> Bool {
+        let before = index > text.startIndex ? text[text.index(before: index)] : nil
+        let afterIndex = text.index(after: index)
+        let after = afterIndex < text.endIndex ? text[afterIndex] : nil
+        if before?.isNumber == true && after?.isNumber == true { return false }
+        let prefix = text[..<index].split(whereSeparator: { $0.isWhitespace || ",;:()[]¿¡".contains($0) }).last.map(String.init) ?? ""
+        let abbreviations = ["Sr", "Sra", "Dr", "Dra", "etc", "p", "pág", "aprox"]
+        if abbreviations.contains(prefix) { return false }
+        return after == nil || after!.isWhitespace || "¿¡\"'".contains(after!)
     }
 }

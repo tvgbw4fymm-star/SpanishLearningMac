@@ -38,8 +38,23 @@ struct ListeningView: View {
                                 subtitle: "选择语料，逐句核对，按自己的节奏练习。")
                 }
                 if store.data.audioMaterials.isEmpty {
-                    ContentUnavailableView("尚无音频", systemImage: "waveform",
-                                           description: Text("选择本机的 MP3、M4A 或 WAV 文件开始。"))
+                    VStack(spacing: 16) {
+                        ContentUnavailableView("尚无音频", systemImage: "waveform",
+                                               description: Text("选择本机的 MP3、M4A 或 WAV 文件开始。"))
+                        HStack(spacing: 12) {
+                            Button("导入音频/视频", systemImage: "plus") { importMedia() }
+                                .buttonStyle(AppActionButtonStyle(prominent: true))
+                            Button("导入字幕文件", systemImage: "captions.bubble") {
+                                status = "请先导入音频，再为对应语料导入字幕文件或粘贴字幕。"
+                            }
+                            .buttonStyle(AppActionButtonStyle())
+                        }
+                        Text("支持 MP3、M4A、WAV、MP4 和 MOV；导入音频后可选择 SRT/VTT 字幕或直接粘贴。")
+                            .font(AppType.ui(12))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
                 } else if let material {
                     Picker("选择语料", selection: $selectedID) {
                         ForEach(store.data.audioMaterials) { item in

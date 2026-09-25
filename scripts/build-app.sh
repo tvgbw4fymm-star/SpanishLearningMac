@@ -3,6 +3,15 @@ set -euo pipefail
 
 PROJECT_ROOT="${0:A:h:h}"
 SDK_PATH="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
+# Use a stable local code-signing identity so the app's designated requirement
+# (and therefore its Keychain ACL) stays the same across rebuilds. Ad-hoc
+# signing ("codesign --sign -") derives the requirement from the binary's
+# cdhash, which changes on every build and makes Keychain treat each rebuild
+# as a different app, prompting for the system password every time.
+SIGN_IDENTITY="SpanishLearningMac Local Dev"
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+  SIGN_IDENTITY="-"
+fi
 ARCHIVE_PATH="$PROJECT_ROOT/dist/西语学习-开发预览.zip"
 BUILD_ROOT="$(mktemp -d /private/tmp/spanish-learning-build.XXXXXX)"
 APP_PATH="$BUILD_ROOT/西语学习-开发预览.app"
@@ -48,7 +57,7 @@ cp "$PROJECT_ROOT/ThirdPartyLicenses/LXGW-WenKai-Screen-OFL.txt" "$APP_PATH/Cont
 cp "$PROJECT_ROOT/ThirdPartyLicenses/swift-fsrs-LICENSE.txt" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_ROOT/ThirdPartyLicenses/swift-fsrs-NOTICE.txt" "$APP_PATH/Contents/Resources/"
 xattr -cr "$APP_PATH"
-codesign --force --sign - "$APP_PATH"
+codesign --force --sign "$SIGN_IDENTITY" "$APP_PATH"
 plutil -lint "$APP_PATH/Contents/Info.plist"
 codesign --verify --deep --strict --verbose=1 "$APP_PATH"
 

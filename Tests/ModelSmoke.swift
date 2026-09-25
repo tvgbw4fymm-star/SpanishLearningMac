@@ -9,6 +9,32 @@ struct ModelSmoke {
         precondition(chunks.count >= 2, "A long article must be divided")
         precondition(chunks.joined(separator: " ") == longText, "Chunking must preserve the text")
 
+        func words(_ value: String) -> Int {
+            value.split(whereSeparator: \.isWhitespace).count
+        }
+        let eightyFour = Array(repeating: "uno", count: 80).joined(separator: " ") + "."
+        let twentyFour = Array(repeating: "dos", count: 24).joined(separator: " ") + "."
+        let closeToTarget = ArticleSplitter.split(eightyFour + " " + twentyFour)
+        precondition(words(closeToTarget[0]) == 104, "Closer sentence must be included")
+
+        let ninetyFour = Array(repeating: "tres", count: 94).joined(separator: " ") + "."
+        let thirtyFive = Array(repeating: "cuatro", count: 35).joined(separator: " ") + "."
+        let earlyCut = ArticleSplitter.split(ninetyFour + " " + thirtyFive)
+        precondition(words(earlyCut[0]) == 94, "Chunk should end at the closer sentence boundary")
+
+        let longSentence = Array(repeating: "cinco", count: 130).joined(separator: " ") + "."
+        precondition(ArticleSplitter.split(longSentence) == [longSentence],
+                     "A sentence longer than the target must remain intact")
+
+        let punctuation = "¿Cómo estás? ¡Muy bien! El Sr. García llegó a las 3.14."
+        let punctuationChunks = ArticleSplitter.split(punctuation, targetWords: 100)
+        precondition(punctuationChunks.joined(separator: " ") == punctuation,
+                     "Spanish punctuation and abbreviations must preserve the text")
+
+        let paragraphs = "Primera frase con contenido.\n\nSegunda frase separada."
+        precondition(ArticleSplitter.split(paragraphs, targetWords: 4).count == 2,
+                     "Paragraph boundaries should remain preferred cut points")
+
         var database = StudyDatabase()
         let articleID = UUID()
         let chunkID = UUID()
@@ -513,6 +539,51 @@ struct ModelSmoke {
             precondition(StudyStore(baseDirectory: target).data.articles.first?.id == savedArticle.id,
                          "Failed restore modified the current library")
         }
+        // A study.json written by an old build (missing every field added since) must still open.
+        let legacyRawDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SpanishLegacyRaw-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: legacyRawDirectory) }
+        try FileManager.default.createDirectory(at: legacyRawDirectory, withIntermediateDirectories: true)
+        let legacyCardID = UUID().uuidString
+        let legacyMaterialID = UUID().uuidString
+        let legacySentenceID = UUID().uuidString
+        let legacyRawJSON = """
+        {
+          "schemaVersion": 1,
+          "audioMaterials": [
+            { "id": "\(legacyMaterialID)", "title": "旧音频", "fileName": "a.mp3",
+              "importedAt": "2023-01-01T00:00:00Z",
+              "sentences": [
+                { "id": "\(legacySentenceID)", "ordinal": 1, "startSeconds": 0, "endSeconds": 2,
+                  "transcript": "Hola.", "status": "generated", "version": 1 }
+              ]
+            }
+          ],
+          "articles": [],
+          "readingRecords": [],
+          "dictationAttempts": [],
+          "writingExercises": [],
+          "cards": [
+            { "id": "\(legacyCardID)", "category": "词汇", "question": "hola", "answer": "hello",
+              "sources": [ { "materialID": "\(legacyMaterialID)", "segmentID": "\(legacySentenceID)" } ],
+              "confirmedAt": null, "dueAt": null, "fsrsState": null }
+          ],
+          "reviewEvents": []
+        }
+        """
+        try Data(legacyRawJSON.utf8).write(to: legacyRawDirectory.appendingPathComponent("study.json"))
+        let legacyRawStore = StudyStore(baseDirectory: legacyRawDirectory)
+        precondition(legacyRawStore.errorMessage == nil, "A pre-existing study.json without newer fields failed to open")
+        precondition(legacyRawStore.data.audioMaterials.count == 1 && legacyRawStore.data.cards.count == 1,
+                     "Legacy study.json lost data on decode")
+        precondition(legacyRawStore.data.cards[0].title == nil && legacyRawStore.data.cards[0].deletedAt == nil &&
+                     legacyRawStore.data.cards[0].mergeKey == nil,
+                     "Fields absent from a legacy database should decode as nil, not fail or fabricate values")
+        try legacyRawStore.updateCardDraft(UUID(uuidString: legacyCardID)!, category: .vocabulary,
+                                          question: "hola", answer: "hello, hi")
+        precondition(StudyStore(baseDirectory: legacyRawDirectory).data.cards[0].answer == "hello, hi",
+                     "A migrated legacy database could not be written back")
+
         print("Model smoke passed: reading chat, writing versions, card merging, FSRS and automatic backup")
     }
 
