@@ -40,26 +40,15 @@ struct ListeningView: View {
                     ContentUnavailableView("尚无音频", systemImage: "waveform",
                                            description: Text("选择本机的 MP3、M4A 或 WAV 文件开始。"))
                 } else if let material {
-                    Menu {
+                    Picker("选择语料", selection: $selectedID) {
                         ForEach(store.data.audioMaterials) { item in
-                            Button(item.title) {
-                                selectedID = item.id
-                                selectedSentenceID = nil
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Text(material.title)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Image(systemName: "chevron.down")
-                                .font(AppType.ui(13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.86))
+                            Text(item.title).tag(Optional(item.id))
                         }
                     }
-                    .menuIndicator(.hidden)
-                    .accessibilityLabel("选择语料")
+                    .labelsHidden()
                     .studyPickerChrome()
                     .frame(maxWidth: 620)
+                    .onChange(of: selectedID) { _, _ in selectedSentenceID = nil }
                     HStack(spacing: 12) {
                         Button("导入音频/视频", systemImage: "plus") { importMedia() }
                             .buttonStyle(AppActionButtonStyle(prominent: true))
@@ -123,22 +112,13 @@ struct ListeningView: View {
                        let sentence {
                         GroupBox {
                             VStack(alignment: .leading, spacing: 16) {
-                                Menu {
+                                Picker("选择句子", selection: $selectedSentenceID) {
                                     ForEach(material.sentences) { item in
-                                        Button("第 \(item.ordinal) 句 · \(formatTime(item.startSeconds))") {
-                                            selectedSentenceID = item.id
-                                        }
-                                    }
-                                } label: {
-                                    HStack {
-                                        Text("第 \(sentence.ordinal) 句 · \(formatTime(sentence.startSeconds))")
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        Image(systemName: "chevron.down")
-                                            .font(AppType.ui(13, weight: .semibold))
-                                            .foregroundStyle(.white.opacity(0.86))
+                                        Text("第 \(item.ordinal) 句 · \(formatTime(item.startSeconds))")
+                                            .tag(Optional(item.id))
                                     }
                                 }
-                                .menuIndicator(.hidden)
+                                .labelsHidden()
                                 .studyPickerChrome()
                                 .frame(maxWidth: 340)
                                 HStack {
@@ -189,26 +169,9 @@ struct ListeningView: View {
                                     Button("再听，再写同一句", systemImage: "arrow.counterclockwise") {
                                         retry(material, sentence)
                                     }
-                                    VStack(alignment: .leading, spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 16) {
                                         if let analysis = sentence.analysis {
-                                            Text("AI 听力分析").font(AppType.ui(14, weight: .semibold))
-                                            if !analysis.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                                Text(analysis.explanation).textSelection(.enabled)
-                                            }
-                                            ForEach(analysis.items ?? []) { item in
-                                                VStack(alignment: .leading, spacing: 4) {
-                                                    Text(analysisTitle(for: item.category))
-                                                        .font(AppType.ui(12, weight: .semibold))
-                                                    Text(item.title).font(AppType.ui(13, weight: .semibold))
-                                                    Text(item.detail).textSelection(.enabled)
-                                                    if let evidence = item.evidence, !evidence.isEmpty {
-                                                        Text("依据：\(evidence)")
-                                                            .font(AppType.ui(12))
-                                                            .foregroundStyle(.secondary)
-                                                    }
-                                                }
-                                                .padding(.top, 4)
-                                            }
+                                            ListeningAnalysisView(analysis: analysis)
                                             if let count = sentence.learningPoints?.count, count > 0 {
                                                 Text("已生成 \(count) 张卡片草稿，可到“卡片”中检查。")
                                                     .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
@@ -349,18 +312,6 @@ struct ListeningView: View {
                 status = error.localizedDescription
                 isGeneratingCards = false
             }
-        }
-    }
-
-    private func analysisTitle(for category: ListeningAnalysisCategory) -> String {
-        switch category {
-        case .difficulty: "🎧 听辨难点"
-        case .connectedSpeech: "🔗 连读 / 语流连接"
-        case .reduction: "🔉 弱读 / 吞音 / 省音"
-        case .accent: "🗣 口音特点"
-        case .expression: "💬 口语表达"
-        case .vocabulary: "📚 词汇 / 搭配"
-        case .attemptDifference: "⚠️ 你的听写差异"
         }
     }
 
@@ -544,6 +495,125 @@ struct ListeningView: View {
         selectedSentenceID = next.id
     }
 
+}
+
+private struct ListeningAnalysisView: View {
+    let analysis: ListeningAnalysis
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("AI 听力分析")
+                .font(AppType.ui(14, weight: .semibold))
+
+            ListeningAnalysisSummaryCard(explanation: analysis.explanation)
+
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(analysis.items ?? []) { item in
+                    ListeningAnalysisItemCard(item: item)
+                }
+            }
+        }
+        .frame(maxWidth: 720, alignment: .leading)
+    }
+}
+
+private struct ListeningAnalysisSummaryCard: View {
+    let explanation: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("听力诊断", systemImage: "ear")
+                .font(AppType.ui(13, weight: .semibold))
+                .foregroundStyle(GlassTheme.cyan)
+            Text(explanation)
+                .font(AppType.ui(16))
+                .lineSpacing(4)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.cyan.opacity(0.20), lineWidth: 1)
+        }
+    }
+}
+
+private struct ListeningAnalysisItemCard: View {
+    let item: ListeningAnalysisItem
+
+    private var isAttemptDifference: Bool {
+        item.category == .attemptDifference
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(categoryTitle)
+                .font(AppType.ui(12, weight: .semibold))
+                .foregroundStyle(isAttemptDifference ? .orange : GlassTheme.cyan)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    (isAttemptDifference ? Color.orange : GlassTheme.cyan).opacity(0.12),
+                    in: Capsule()
+                )
+
+            Text(item.title)
+                .font(AppType.ui(16, weight: .semibold))
+                .lineSpacing(2)
+                .textSelection(.enabled)
+
+            Text(item.detail)
+                .font(AppType.ui(15))
+                .lineSpacing(5)
+                .textSelection(.enabled)
+
+            if let evidence = item.evidence?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !evidence.isEmpty {
+                Divider()
+                    .overlay(.white.opacity(0.14))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("依据")
+                        .font(AppType.ui(11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(evidence)
+                        .font(AppType.ui(12))
+                        .lineSpacing(3)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            isAttemptDifference ? Color.orange.opacity(0.07) : Color.white.opacity(0.07),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    isAttemptDifference ? Color.orange.opacity(0.20) : Color.white.opacity(0.13),
+                    lineWidth: 1
+                )
+        }
+    }
+
+    private var categoryTitle: String {
+        switch item.category {
+        case .difficulty: "🎧 听辨难点"
+        case .connectedSpeech: "🔗 连读 / 语流连接"
+        case .reduction: "🔉 弱读 / 吞音 / 省音"
+        case .accent: "🗣 口音特点"
+        case .expression: "💬 口语表达"
+        case .vocabulary: "📚 词汇 / 搭配"
+        case .attemptDifference: "⚠️ 你的听写差异"
+        }
+    }
 }
 
 private struct LearningPointsEditor: View {
