@@ -46,6 +46,90 @@ enum SentenceSegmenter {
     }
 }
 
+struct NativeSpeechSegment: Equatable, Sendable {
+    let substring: String
+    let timestamp: Double
+    let duration: Double
+
+    var end: Double { timestamp + max(0, duration) }
+}
+
+struct NativeSpeechSentenceSegmenter {
+    private static let softLimit = 10.0
+    private static let hardLimit = 18.0
+    private static let pauseThreshold = 0.65
+    private static let sentenceTerminators = CharacterSet(charactersIn: ".?!。！？")
+
+    private var pending: [NativeSpeechSegment] = []
+    private var lastEmittedEnd: Double?
+
+    mutating func consume(_ segments: [NativeSpeechSegment]) -> [ListeningSentence] {
+        pending.append(contentsOf: segments.filter { $0.duration >= 0 })
+        var result: [ListeningSentence] = []
+        while let boundary = boundaryIndex() {
+            let group = Array(pending.prefix(through: boundary))
+            pending.removeFirst(boundary + 1)
+            result.append(makeSentence(from: group))
+        }
+        return result
+    }
+
+    mutating func finish() -> [ListeningSentence] {
+        guard !pending.isEmpty else { return [] }
+        let sentence = makeSentence(from: pending)
+        pending.removeAll()
+        return [sentence]
+    }
+
+    private func boundaryIndex() -> Int? {
+        guard !pending.isEmpty else { return nil }
+        let start = pending[0].timestamp
+        for index in pending.indices {
+            let segment = pending[index]
+            let elapsed = segment.end - start
+            if endsSentence(segment.substring) {
+                return index
+            }
+            if index + 1 < pending.count {
+                let next = pending[index + 1]
+                let pause = next.timestamp - segment.end
+                if pause >= Self.pauseThreshold {
+                    return index
+                }
+            }
+            if elapsed >= Self.hardLimit {
+                return index
+            }
+            if elapsed >= Self.softLimit, index + 1 < pending.count {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private func endsSentence(_ text: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+        return String(last).rangeOfCharacter(from: Self.sentenceTerminators) != nil
+    }
+
+    private mutating func makeSentence(from group: [NativeSpeechSegment]) -> ListeningSentence {
+        let rawStart = group.first?.timestamp ?? 0
+        let rawEnd = group.last?.end ?? rawStart
+        let start = max(lastEmittedEnd ?? 0, max(0, rawStart))
+        let end = max(start + 0.001, rawEnd)
+        lastEmittedEnd = end
+        return ListeningSentence(
+            id: UUID(),
+            ordinal: 0,
+            startSeconds: start,
+            endSeconds: end,
+            transcript: group.map(\.substring).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines),
+            status: .generated,
+            version: 1
+        )
+    }
+}
+
 private extension String {
     func components(separatedBy regex: NSRegularExpression) -> [String] {
         let range = NSRange(startIndex..., in: self)
@@ -107,15 +191,27 @@ enum TranscriptionService {
         defer { try? FileManager.default.removeItem(at: work) }
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         var offset = start
+        var segmenter = NativeSpeechSentenceSegmenter()
         while let chunk = try AudioChunker.next(audioURL, after: offset, into: work) {
             try Task.checkCancellation()
             let result = try await recognize(chunk.url, with: recognizer)
             try Task.checkCancellation()
-            let sentences = sentences(from: result, offset: chunk.offset)
+            let segments = result.bestTranscription.segments.map {
+                NativeSpeechSegment(
+                    substring: $0.substring,
+                    timestamp: chunk.offset + $0.timestamp,
+                    duration: $0.duration
+                )
+            }
+            let sentences = segmenter.consume(segments)
             let through = chunk.offset + chunk.duration
             try await onChunk(sentences, through)
             try? FileManager.default.removeItem(at: chunk.url)
             offset = through
+        }
+        let finalSentences = segmenter.finish()
+        if !finalSentences.isEmpty {
+            try await onChunk(finalSentences, offset)
         }
     }
 
@@ -138,31 +234,4 @@ enum TranscriptionService {
         }
     }
 
-    private static func sentences(from result: SFSpeechRecognitionResult, offset: Double) -> [ListeningSentence] {
-        let words = result.bestTranscription.segments
-        guard !words.isEmpty else { return [] }
-        var sentences: [ListeningSentence] = []
-        var group: [SFTranscriptionSegment] = []
-        func flush() {
-            guard let first = group.first, let last = group.last else { return }
-            let text = group.map(\.substring).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                sentences.append(ListeningSentence(id: UUID(), ordinal: 0,
-                    startSeconds: offset + first.timestamp,
-                    endSeconds: offset + last.timestamp + last.duration,
-                    transcript: text, status: .generated, version: 1))
-            }
-            group.removeAll()
-        }
-        for word in words {
-            group.append(word)
-            let end = word.substring.trimmingCharacters(in: .whitespacesAndNewlines)
-            if end.hasSuffix(".") || end.hasSuffix("?") || end.hasSuffix("!") ||
-                (word.timestamp + word.duration - (group.first?.timestamp ?? 0)) >= 18 {
-                flush()
-            }
-        }
-        flush()
-        return sentences
-    }
 }

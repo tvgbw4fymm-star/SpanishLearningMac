@@ -60,6 +60,92 @@ struct AudioPipelineSmoke {
         precondition(sentences.count == 2)
         precondition(sentences[0].startSeconds == 10 && sentences[1].endSeconds == 14)
         precondition(sentences[0].status == .generated)
+
+        var punctuationSegmenter = NativeSpeechSentenceSegmenter()
+        let punctuation = punctuationSegmenter.consume([
+            NativeSpeechSegment(substring: "Hola.", timestamp: 0, duration: 0.5),
+            NativeSpeechSegment(substring: "¿Cómo", timestamp: 0.6, duration: 0.5),
+            NativeSpeechSegment(substring: "estás?", timestamp: 1.2, duration: 0.5)
+        ])
+        precondition(punctuation.count == 2)
+        precondition(punctuation[0].transcript == "Hola.")
+        precondition(punctuation[1].transcript == "¿Cómo estás?")
+        precondition(punctuationSegmenter.finish().isEmpty)
+
+        var pauseSegmenter = NativeSpeechSentenceSegmenter()
+        let pauseFirst = pauseSegmenter.consume([
+            NativeSpeechSegment(substring: "Primera", timestamp: 0, duration: 1),
+            NativeSpeechSegment(substring: "frase", timestamp: 1.1, duration: 1)
+        ])
+        precondition(pauseFirst.isEmpty)
+        let pauseSecond = pauseSegmenter.consume([
+            NativeSpeechSegment(substring: "Segunda", timestamp: 3.0, duration: 1),
+            NativeSpeechSegment(substring: "frase", timestamp: 4.1, duration: 1)
+        ])
+        precondition(pauseSecond.count == 1)
+        precondition(pauseSecond[0].transcript == "Primera frase")
+        let pauseTail = pauseSegmenter.finish()
+        precondition(pauseTail.count == 1 && pauseTail[0].transcript == "Segunda frase")
+
+        var shortPauseSegmenter = NativeSpeechSentenceSegmenter()
+        precondition(shortPauseSegmenter.consume([
+            NativeSpeechSegment(substring: "alguna", timestamp: 100.52, duration: 0.24),
+            NativeSpeechSegment(substring: "historia y", timestamp: 100.76, duration: 0.45),
+            NativeSpeechSegment(substring: "por", timestamp: 101.21, duration: 0.15)
+        ]).isEmpty)
+        let shortPause = shortPauseSegmenter.consume([
+            NativeSpeechSegment(substring: "Bueno", timestamp: 129.01, duration: 0.15)
+        ])
+        precondition(shortPause.count == 1)
+        precondition(shortPause[0].transcript == "alguna historia y por")
+        let shortPauseTail = shortPauseSegmenter.finish()
+        precondition(shortPauseTail.count == 1)
+        precondition(shortPauseTail[0].transcript == "Bueno")
+        precondition(shortPause[0].endSeconds < shortPauseTail[0].startSeconds)
+
+        var crossChunkPauseSegmenter = NativeSpeechSentenceSegmenter()
+        precondition(crossChunkPauseSegmenter.consume([
+            NativeSpeechSegment(substring: "español", timestamp: 1021.02, duration: 0.45)
+        ]).isEmpty)
+        let crossChunkPause = crossChunkPauseSegmenter.consume([
+            NativeSpeechSegment(substring: "Luego tuve un desamor y de aquí", timestamp: 1051.79, duration: 3.0)
+        ])
+        precondition(crossChunkPause.count == 1)
+        precondition(crossChunkPause[0].transcript == "español")
+        let crossChunkPauseTail = crossChunkPauseSegmenter.finish()
+        precondition(crossChunkPauseTail.count == 1)
+        precondition(crossChunkPauseTail[0].transcript == "Luego tuve un desamor y de aquí")
+        precondition(crossChunkPause[0].endSeconds < crossChunkPauseTail[0].startSeconds)
+
+        var longSegmenter = NativeSpeechSentenceSegmenter()
+        let longSegments = (0..<25).map {
+            NativeSpeechSegment(substring: "palabra\($0)", timestamp: Double($0), duration: 0.4)
+        }
+        let longSentences = longSegmenter.consume(longSegments) + longSegmenter.finish()
+        precondition(longSentences.count >= 2)
+        precondition(longSentences.allSatisfy { $0.startSeconds < $0.endSeconds })
+        precondition(zip(longSentences, longSentences.dropFirst()).allSatisfy {
+            $0.endSeconds <= $1.startSeconds
+        })
+
+        var chunkSegmenter = NativeSpeechSentenceSegmenter()
+        precondition(chunkSegmenter.consume([
+            NativeSpeechSegment(substring: "跨块", timestamp: 30, duration: 1)
+        ]).isEmpty)
+        let chunkSentences = chunkSegmenter.consume([
+            NativeSpeechSegment(substring: "句子。", timestamp: 31.2, duration: 1)
+        ])
+        precondition(chunkSentences.count == 1)
+        precondition(chunkSentences[0].startSeconds == 30)
+        precondition(chunkSentences[0].endSeconds == 32.2)
+
+        var abnormalSegmenter = NativeSpeechSentenceSegmenter()
+        let abnormal = abnormalSegmenter.consume([
+            NativeSpeechSegment(substring: "超长片段", timestamp: 0, duration: 25)
+        ]) + abnormalSegmenter.finish()
+        precondition(abnormal.count == 1)
+        precondition(abnormal[0].startSeconds < abnormal[0].endSeconds)
+
         print("Audio pipeline smoke passed: native WAV slicing and timestamped sentence parsing")
     }
 }
