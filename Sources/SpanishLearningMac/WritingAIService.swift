@@ -38,6 +38,11 @@ struct WritingFeedbackResult: Decodable, Sendable {
     let card: CorrectionCard
 }
 
+struct WritingHintResult: Decodable, Sendable {
+    let expressionIdeas: [String]
+    let cautions: [String]
+}
+
 private struct WritingResponsesEnvelope: Decodable {
     struct Output: Decodable {
         struct Content: Decodable {
@@ -52,6 +57,57 @@ private struct WritingResponsesEnvelope: Decodable {
 }
 
 enum WritingAIService {
+    static let writingHintSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "expressionIdeas": [
+                "type": "array",
+                "description": "帮助学习者开始或继续组织西语的关键词、短语和语法骨架；不得组成完整答案。",
+                "items": ["type": "string"],
+                "maxItems": 5
+            ],
+            "cautions": [
+                "type": "array",
+                "description": "针对本题最容易出错的介词、动词形式、性数配合、时态或固定搭配提醒。",
+                "items": ["type": "string"],
+                "maxItems": 4
+            ]
+        ],
+        "required": ["expressionIdeas", "cautions"],
+        "additionalProperties": false
+    ]
+
+    static func generateWritingHint(chinesePrompt: String,
+                                    staticHint: String?,
+                                    sourceContext: String?,
+                                    learnerDraft: String,
+                                    apiKey: String) async throws -> WritingHintResult {
+        let input = """
+        中文题目：
+        \(chinesePrompt)
+
+        题目已有的静态学习目标（仅作参考）：
+        \(staticHint?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? staticHint! : "（无）")
+
+        当前来源或上下文：
+        \(sourceContext?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? sourceContext! : "（无）")
+
+        学习者当前西语草稿：
+        \(learnerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（尚未开始）" : learnerDraft)
+        """
+        let instructions = """
+        你是西班牙语写作教练，用户母语是中文。你的任务是给写作提示，不是代写或批改作文。
+        请针对当前中文题目提供能让学习者开始或继续写作的语言支架。不要重复中文题目，不要使用“练习用……”“本题考查……”等空泛话术。
+        expressionIdeas 应包含关键表达、短语、语法骨架、时态方向或动词后接 infinitivo / gerundio / subjuntivo 等有用线索；可以给局部、非完整答案的短例子，但不得把它们拼成当前题目的完整西语句子。
+        cautions 应只列本题相关且真正有帮助的易错点，例如介词、性数配合、动词形式、时态或固定搭配。
+        如果学习者已有草稿，优先提示下一步如何组织或补全，不要做完整作文批改。
+        严禁输出当前题目的完整翻译、完整目标句或可以直接提交的答案。内容必须动态针对题目，不要臆造来源信息。
+        """
+        return try await request(modelInput: input, instructions: instructions,
+                                 schemaName: "writing_hint", schema: writingHintSchema,
+                                 apiKey: apiKey, result: WritingHintResult.self)
+    }
+
     static func generatePrompt(sourceSpanish: String, sourceKind: String,
                                sourceTitle: String, apiKey: String) async throws -> WritingPromptResult {
         let schema: [String: Any] = [

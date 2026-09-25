@@ -37,6 +37,10 @@ struct WritingView: View {
     @State private var chinesePrompt = ""
     @State private var referenceSpanish = ""
     @State private var focus = ""
+    @State private var isHintRevealed = false
+    @State private var writingHint: WritingHintResult?
+    @State private var isGeneratingHint = false
+    @State private var hintError: String?
     @State private var learnerSpanish = ""
     @State private var feedback: WritingFeedbackDisplay?
     @State private var working = false
@@ -228,11 +232,53 @@ struct WritingView: View {
         GroupBox("中文题目") {
             VStack(alignment: .leading, spacing: 14) {
                 Text(chinesePrompt)
-                    .font(AppType.ui(23, weight: .semibold))
-                    .lineSpacing(6).textSelection(.enabled)
-                if !focus.isEmpty {
-                    Label(focus, systemImage: "scope")
-                        .font(AppType.ui(15, weight: .regular)).foregroundStyle(.secondary)
+                .font(AppType.ui(23, weight: .semibold))
+                .lineSpacing(6).textSelection(.enabled)
+                Button {
+                if writingHint != nil {
+                    isHintRevealed.toggle()
+                } else {
+                    generateWritingHint()
+                }
+                } label: {
+                Label(
+                    isGeneratingHint ? "正在生成提示…" :
+                        (isHintRevealed ? "收起提示" : "提示"),
+                    systemImage: isGeneratingHint ? "hourglass" :
+                        (isHintRevealed ? "lightbulb.slash" : "lightbulb")
+                )
+                }
+                .buttonStyle(AppActionButtonStyle())
+                .disabled(isGeneratingHint)
+                if let hintError {
+                Text(hintError)
+                    .font(AppType.ui(13))
+                    .foregroundStyle(.orange)
+                }
+                if isHintRevealed, let writingHint {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("表达思路", systemImage: "lightbulb")
+                        .font(AppType.ui(15, weight: .semibold))
+                        .foregroundStyle(GlassTheme.cyan)
+                    ForEach(writingHint.expressionIdeas, id: \.self) { idea in
+                        Text("• \(idea)")
+                    }
+                    if !writingHint.cautions.isEmpty {
+                        Divider()
+                        Label("注意", systemImage: "exclamationmark.triangle")
+                            .font(AppType.ui(15, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        ForEach(writingHint.cautions, id: \.self) { caution in
+                            Text("• \(caution)")
+                        }
+                    }
+                }
+                .font(AppType.ui(15))
+                .lineSpacing(4)
+                .foregroundStyle(.secondary)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 Divider()
                 Text("你的西语").font(AppType.ui(17, weight: .semibold))
@@ -309,6 +355,9 @@ struct WritingView: View {
         reviewedChinese = ""
         referenceSpanish = exercise.referenceSpanish ?? ""
         focus = exercise.focus ?? ""
+        isHintRevealed = false
+        writingHint = nil
+        hintError = nil
         learnerSpanish = exercise.versions.last?.spanishText ?? ""
         selectedSegmentID = exercise.sourceSegmentID
         if let id = exercise.sourceID, store.data.audioMaterials.contains(where: { $0.id == id }) {
@@ -326,6 +375,9 @@ struct WritingView: View {
         reviewedChinese = ""
         referenceSpanish = ""
         focus = ""
+        isHintRevealed = false
+        writingHint = nil
+        hintError = nil
         learnerSpanish = ""
         feedback = nil
         notice = nil
@@ -338,6 +390,9 @@ struct WritingView: View {
         reviewedChinese = ""
         referenceSpanish = ""
         focus = ""
+        isHintRevealed = false
+        writingHint = nil
+        hintError = nil
         learnerSpanish = ""
         feedback = nil
         notice = nil
@@ -378,6 +433,9 @@ struct WritingView: View {
         working = true
         notice = "正在从这段材料准备一道中文题目…"
         selectedExerciseID = nil
+        isHintRevealed = false
+        writingHint = nil
+        hintError = nil
         Task {
             do {
                 let generated = try await WritingAIService.generatePrompt(sourceSpanish: source.text,
@@ -387,11 +445,54 @@ struct WritingView: View {
                 chinesePrompt = generated.chinesePrompt
                 referenceSpanish = generated.referenceSpanish
                 focus = generated.focus
+                isHintRevealed = false
+                writingHint = nil
+                hintError = nil
                 learnerSpanish = ""
                 feedback = nil
                 notice = "题目已生成。参考西语会在提交后显示。"
             } catch { notice = error.localizedDescription }
             working = false
+        }
+    }
+
+    private func generateWritingHint() {
+        guard !isGeneratingHint else { return }
+        let prompt = chinesePrompt
+        let staticHint = focus
+        let sourceContext = mode == .material ? selectedSource?.text : nil
+        let draft = learnerSpanish
+        let key: String
+        do { key = try AIProviderSettings.textKey() ?? "" }
+        catch {
+            hintError = error.localizedDescription
+            return
+        }
+        guard !key.isEmpty else {
+            hintError = AIProviderError.missingKey.localizedDescription
+            return
+        }
+        isGeneratingHint = true
+        hintError = nil
+        Task {
+            do {
+                let result = try await WritingAIService.generateWritingHint(
+                    chinesePrompt: prompt,
+                    staticHint: staticHint,
+                    sourceContext: sourceContext,
+                    learnerDraft: draft,
+                    apiKey: key
+                )
+                guard chinesePrompt == prompt else {
+                    isGeneratingHint = false
+                    return
+                }
+                writingHint = result
+                isHintRevealed = true
+            } catch {
+                hintError = "提示生成失败，请重试"
+            }
+            isGeneratingHint = false
         }
     }
 
@@ -609,4 +710,3 @@ private func writingDayKey(_ date: Date) -> String {
 private func writingWordCount(_ text: String) -> Int {
     text.split(whereSeparator: { $0.isWhitespace }).count
 }
-

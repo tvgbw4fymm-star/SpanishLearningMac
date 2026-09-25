@@ -118,6 +118,18 @@ struct ModelSmoke {
         assertStrictObjectsHaveMatchingRequiredProperties(listeningSchema)
         let cardsSchema = AIStudyService.listeningCardsSchema()
         assertStrictObjectsHaveMatchingRequiredProperties(cardsSchema)
+        let writingHintSchema = WritingAIService.writingHintSchema
+        assertStrictObjectsHaveMatchingRequiredProperties(writingHintSchema)
+        let writingHintJSON = """
+        {"expressionIdeas":["可以考虑使用一个表示持续的时态结构。","先写主句，再补充原因。"],"cautions":["注意动词后面的形式。"]}
+        """
+        let writingHint = try decoder.decode(WritingHintResult.self, from: Data(writingHintJSON.utf8))
+        precondition(writingHint.expressionIdeas.count == 2 && writingHint.cautions.count == 1)
+        let emptyWritingHint = try decoder.decode(
+            WritingHintResult.self,
+            from: Data(#"{"expressionIdeas":[],"cautions":[]}"#.utf8)
+        )
+        precondition(emptyWritingHint.expressionIdeas.isEmpty && emptyWritingHint.cautions.isEmpty)
         let analysisCategories = (((listeningSchema["properties"] as! [String: Any])["items"] as! [String: Any])["items"] as! [String: Any])["properties"] as! [String: Any]
         let categoryValues = ((analysisCategories["category"] as! [String: Any])["enum"] as! [String])
         precondition(!categoryValues.contains("expression") && !categoryValues.contains("vocabulary"))
