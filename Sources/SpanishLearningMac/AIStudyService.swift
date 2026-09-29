@@ -228,7 +228,59 @@ struct TranscriptProofreadingResult: Decodable, Sendable {
     let explanation: String
 }
 
+struct SpeechTranscriptReview: Decodable, Sendable {
+    enum Decision: String, Decodable, Sendable {
+        case keepSpeech
+        case useReference
+        case corrected
+    }
+
+    let decision: Decision
+    let correctedText: String
+    let reason: String
+    let confidence: Double
+}
+
 extension AIStudyService {
+    static func reviewSpeechTranscript(_ speech: String, reference: String,
+                                       previousContext: String?, nextContext: String?,
+                                       similarity: Double, apiKey: String) async throws -> SpeechTranscriptReview {
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "decision": ["type": "string", "enum": ["keepSpeech", "useReference", "corrected"]],
+                "correctedText": ["type": "string"],
+                "reason": ["type": "string"],
+                "confidence": ["type": "number", "minimum": 0, "maximum": 1]
+            ],
+            "required": ["decision", "correctedText", "reason", "confidence"],
+            "additionalProperties": false
+        ]
+        let input = """
+        Speech transcript: \(speech)
+        Reference subtitle text: \(reference)
+        Previous sentence context: \(previousContext ?? "(none)")
+        Next sentence context: \(nextContext ?? "(none)")
+        Deterministic text similarity: \(similarity)
+        """
+        let result = try await AITextClient.request(
+            input: input,
+            instructions: """
+            You did not hear the audio. The Speech transcript was recognized from the actual audio and its timestamps are authoritative. The subtitle is text reference only and may come from another edit or be inaccurate. Assess text only: do not create or modify timestamps, sentence boundaries, IDs, or references. Do not add content unsupported by the Speech text, reference, and neighboring context. Prefer keepSpeech when uncertain. Use useReference only when the reference clearly represents the same spoken words; otherwise use corrected only for a conservative text correction. correctedText must contain only the final text for this one sentence. Return no extra sentences.
+            """,
+            schemaName: "speech_subtitle_text_review",
+            schema: schema,
+            apiKey: apiKey,
+            result: SpeechTranscriptReview.self
+        )
+        guard (0...1).contains(result.confidence) else { throw AIStudyError.invalidResponse }
+        if result.decision != .keepSpeech,
+           result.correctedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw AIStudyError.invalidResponse
+        }
+        return result
+    }
+
     static func proofreadTranscript(_ transcript: String, speechRecognition: String?, apiKey: String) async throws -> TranscriptProofreadingResult {
         let schema: [String: Any] = [
             "type": "object",

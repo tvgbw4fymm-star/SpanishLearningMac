@@ -20,7 +20,10 @@ CLANG_MODULE_CACHE_PATH=/private/tmp/spanish-learning-clang-cache \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/FSRSScheduler.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/AudioChunker.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/TranscriptionService.swift" \
+  "$PROJECT_ROOT/Sources/SpanishLearningMac/WhisperListeningPipeline.swift" \
+  "$PROJECT_ROOT/Sources/SpanishLearningMac/ListeningSubtitleAlignment.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/SubtitleImporter.swift" \
+  "$PROJECT_ROOT/Tests/WhisperServiceSmokeStub.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/StudyStore.swift" \
   "$PROJECT_ROOT/Sources/SpanishLearningMac/BackupManager.swift" \
   "$PROJECT_ROOT/Tests/ModelSmoke.swift" \

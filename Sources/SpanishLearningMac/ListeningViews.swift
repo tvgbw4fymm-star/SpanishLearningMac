@@ -73,7 +73,7 @@ struct ListeningView: View {
                             .disabled(store.activeTranscriptions.contains(material.id))
                         Button("粘贴字幕", systemImage: "doc.on.clipboard") { showPasteSubtitles = true }
                             .buttonStyle(AppActionButtonStyle(prominent: true))
-                        Text("支持 SRT / VTT；按字幕时间自动切成练习句。")
+                        Text("有字幕时保留字幕文本并校准音频时间；无字幕时使用本机转写。")
                             .font(AppType.ui(12)).foregroundStyle(.secondary)
                     }
                     GroupBox {
@@ -94,12 +94,16 @@ struct ListeningView: View {
                             if store.activeTranscriptions.contains(material.id) {
                                 HStack {
                                     ProgressView().controlSize(.small)
-                                    Text("正在转写并保存进度…").foregroundStyle(.secondary)
+                                    Text(material.referenceSubtitleCues?.isEmpty == false
+                                         ? "正在校准字幕时间…"
+                                         : "正在本机转写…")
+                                        .foregroundStyle(.secondary)
                                     Spacer()
                                     Button("暂停") { store.pauseTranscription(materialID: material.id) }
                                 }
                             }
-                            if let progress = store.transcriptionStatus[material.id] {
+                            if material.segmentationSource != .subtitle,
+                               let progress = store.transcriptionStatus[material.id] {
                                 Text(progress).font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
                             }
                             if !material.sentences.isEmpty {
@@ -351,28 +355,78 @@ struct ListeningView: View {
     }
 
     private func materialSummary(_ material: AudioMaterial) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let state: String
+        if let cues = material.referenceSubtitleCues, !cues.isEmpty {
+            if material.segmentationSource == .subtitleCalibrated {
+                let calibrated = material.sentences.filter { $0.timingSource == .speechCalibrated }.count
+                state = calibrated == material.sentences.count ? "字幕时间已校准" : "字幕时间部分校准"
+            } else if material.segmentationSource == .speech, !material.sentences.isEmpty {
+                state = "字幕已导入，待主动校准（\(cues.count) 条）"
+            } else {
+                state = material.transcribedThroughSeconds != nil
+                    ? "本机音频校准可继续"
+                    : "字幕 + 本机音频校准（\(cues.count) 条字幕）"
+            }
+        } else {
+            switch material.segmentationSource {
+            case .subtitle:
+                state = "旧版字幕切片（未迁移）"
+            case .subtitleCalibrated:
+                state = "字幕 + 本机音频校准"
+            case .speech:
+                state = material.transcriptionComplete == true ? "本机转写已完成" :
+                    material.transcribedThroughSeconds != nil ? "本机转写可继续" : "本机转写未开始"
+            case nil:
+                state = material.transcriptionComplete == true ? "转写已完成" :
+                    material.transcribedThroughSeconds != nil ? "转写可继续" : "尚未转写"
+            }
+        }
+        return VStack(alignment: .leading, spacing: 4) {
             Text(material.title)
                 .font(AppType.ui(17, weight: .semibold))
                 .lineLimit(2)
-            Text("\(material.sentences.count) 句 · \(material.transcriptionComplete == true ? "转写已完成" : material.transcribedThroughSeconds != nil ? "转写可继续" : "尚未转写")")
+            Text("\(material.sentences.count) 句 · \(state)")
                 .font(AppType.ui(12)).foregroundStyle(.secondary)
         }
     }
 
     private func materialActions(_ material: AudioMaterial) -> some View {
-        HStack(spacing: 12) {
+        let hasSubtitleReference = material.referenceSubtitleCues?.isEmpty == false
+        let needsExplicitSubtitleCalibration = hasSubtitleReference &&
+            material.segmentationSource == .speech && !material.sentences.isEmpty
+        let transcriptionButtonTitle = hasSubtitleReference
+            ? (needsExplicitSubtitleCalibration
+                ? "用字幕重新校准"
+                : store.whisperModelInstalled ? "字幕 + 本机音频校准" : "准备本地转写模型")
+            : (store.whisperModelInstalled ? "本机转写" : "准备本地转写模型")
+        return HStack(spacing: 12) {
             Button(playing && playbackSentenceID == nil ? "暂停整段" :
                    player != nil && playbackSentenceID == nil ? "继续整段" : "整段播放",
                    systemImage: playing && playbackSentenceID == nil ? "pause.fill" : "play.circle") {
                 togglePlayback(material: material, sentence: nil)
             }
-            Button(material.transcribedThroughSeconds == nil ? "本机转写" : "继续转写") {
-                startTranscription(material)
+            if material.segmentationSource == .subtitle {
+                Label("旧版字幕切片（未迁移）", systemImage: "captions.bubble")
+                    .font(AppType.ui(13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if material.segmentationSource == .subtitleCalibrated {
+                Label("字幕 + 本机音频校准", systemImage: "waveform")
+                    .font(AppType.ui(13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if needsExplicitSubtitleCalibration {
+                Button(transcriptionButtonTitle) {
+                    startWhisperSubtitleRecalibration(material)
+                }
+                .buttonStyle(AppActionButtonStyle(prominent: true))
+                .disabled(!store.canRecalibrateSubtitles(materialID: material.id))
+            } else {
+                Button(transcriptionButtonTitle) {
+                    startTranscription(material)
+                }
+                .buttonStyle(AppActionButtonStyle(prominent: true))
+                .disabled(store.activeTranscriptions.contains(material.id) || material.transcriptionComplete == true ||
+                          store.data.dictationAttempts.contains(where: { $0.materialID == material.id }))
             }
-            .buttonStyle(AppActionButtonStyle(prominent: true))
-            .disabled(store.activeTranscriptions.contains(material.id) || material.transcriptionComplete == true ||
-                      store.data.dictationAttempts.contains(where: { $0.materialID == material.id }))
         }
     }
 
@@ -415,17 +469,20 @@ struct ListeningView: View {
         do {
             try store.importSubtitles(from: url, materialID: material.id)
             selectedSentenceID = nil
-            status = "已按时间戳切句。请核对字幕与音频，再开始逐句听写。"
-            showReview = true
-            Task {
-                do { try await store.generateAudioTitle(materialID: material.id) }
-                catch { status = "字幕已导入，标题生成失败：\(error.localizedDescription)" }
-            }
+            status = material.transcriptionComplete == true
+                ? "字幕已保存；点击“用字幕重新校准”以字幕 cue 生成练习句。"
+                : "字幕已保存；点击“字幕 + 本机音频校准”生成字幕句子并局部校准时间。"
+            showReview = false
         } catch { status = error.localizedDescription }
     }
 
     private func startTranscription(_ material: AudioMaterial) {
         do { try store.startTranscription(materialID: material.id) }
+        catch { status = error.localizedDescription }
+    }
+
+    private func startWhisperSubtitleRecalibration(_ material: AudioMaterial) {
+        do { try store.startWhisperSubtitleRecalibration(materialID: material.id) }
         catch { status = error.localizedDescription }
     }
 

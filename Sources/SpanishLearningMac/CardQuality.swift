@@ -108,6 +108,9 @@ enum CardAuditService {
             let audited = CardContentNormalizer.normalize(CardDraft(
                 category: normalized.category, mergeKey: normalized.mergeKey,
                 question: result.question, answer: result.answer))
+            guard !audited.question.isEmpty, !audited.answer.isEmpty else {
+                throw AIStudyError.invalidResponse
+            }
             return CardAuditDecision(title: CardContentNormalizer.title(for: audited, auditedTitle: result.title),
                                      question: audited.question, answer: audited.answer,
                                      usedFallback: false)

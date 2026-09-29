@@ -11,12 +11,12 @@ enum SubtitleImportError: LocalizedError {
 }
 
 enum SubtitleImporter {
-    static func parse(_ data: Data) throws -> [ListeningSentence] {
+    static func parse(_ data: Data) throws -> [SubtitleCue] {
         guard var content = String(data: data, encoding: .utf8) else { throw SubtitleImportError.unreadable }
         content = content.replacingOccurrences(of: "\u{FEFF}", with: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        var sentences: [ListeningSentence] = []
+        var cues: [SubtitleCue] = []
         for block in content.components(separatedBy: "\n\n") {
             let lines = block.split(separator: "\n").map(String.init)
             guard let timeIndex = lines.firstIndex(where: { $0.contains("-->") }) else { continue }
@@ -28,33 +28,11 @@ enum SubtitleImporter {
                 .replacingOccurrences(of: #"\{\\[^}]+\}"#, with: "", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !clean.isEmpty else { continue }
-            let pieces = splitSentences(clean)
-            let total = Double(pieces.reduce(0) { $0 + $1.count })
-            var cursor = start
-            for (index, piece) in pieces.enumerated() {
-                let next = index == pieces.count - 1 ? end : cursor + (end - start) * Double(piece.count) / max(total, 1)
-                sentences.append(ListeningSentence(id: UUID(), ordinal: sentences.count + 1,
-                                                    startSeconds: cursor, endSeconds: next,
-                                                    transcript: piece, status: .generated, version: 1))
-                cursor = next
-            }
+            cues.append(SubtitleCue(id: UUID(), ordinal: cues.count + 1,
+                                    startSeconds: start, endSeconds: end, text: clean))
         }
-        guard !sentences.isEmpty else { throw SubtitleImportError.noTimedSpeech }
-        return sentences
-    }
-
-    private static func splitSentences(_ text: String) -> [String] {
-        let regex = try! NSRegularExpression(pattern: #"(?<=[.!?])\s+(?=[¿¡A-ZÁÉÍÓÚÜÑ])"#)
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        var cursor = text.startIndex
-        var parts: [String] = []
-        for match in matches {
-            guard let range = Range(match.range, in: text) else { continue }
-            parts.append(String(text[cursor..<range.lowerBound]))
-            cursor = range.upperBound
-        }
-        parts.append(String(text[cursor...]))
-        return parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !cues.isEmpty else { throw SubtitleImportError.noTimedSpeech }
+        return cues
     }
 
     private static func seconds(_ raw: String) -> Double? {

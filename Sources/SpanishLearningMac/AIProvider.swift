@@ -80,6 +80,10 @@ enum AIProviderError: LocalizedError {
 }
 
 enum AITextClient {
+    /// Test-only seam: when non-nil, network requests are routed through these URLProtocol
+    /// classes instead of hitting the real network. Always nil in production.
+    static var testProtocolClassesOverride: [AnyClass]?
+
     static func request<T: Decodable>(input: String, instructions: String,
                                       schemaName: String, schema: [String: Any],
                                       apiKey: String, result: T.Type) async throws -> T {
@@ -110,6 +114,7 @@ enum AITextClient {
         request.timeoutInterval = 120
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForResource = 180
+        if let overrides = testProtocolClassesOverride { configuration.protocolClasses = overrides }
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)

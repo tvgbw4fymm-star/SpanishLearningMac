@@ -66,6 +66,18 @@ struct WritingHintResult: Decodable, Sendable {
     let cautions: [String]
 }
 
+struct WritingSubmissionContext: Equatable {
+    let exerciseID: UUID?
+    let mode: WritingMode
+    let prompt: String
+    let learnerSpanish: String
+    let sourceID: UUID?
+    let sourceSegmentID: UUID?
+    let sourceQuote: String?
+    let referenceSpanish: String?
+    let focus: String
+}
+
 struct WritingFeedbackPresentation: Codable, Sendable {
     let summary: String?
     let issues: [WritingFeedbackPresentationItem]

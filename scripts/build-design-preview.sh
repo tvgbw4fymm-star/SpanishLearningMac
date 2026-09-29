@@ -45,6 +45,7 @@ PLIST
 cp "$PROJECT_ROOT/ThirdPartyLicenses/LXGW-WenKai-Screen-OFL.txt" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_ROOT/ThirdPartyLicenses/swift-fsrs-LICENSE.txt" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_ROOT/ThirdPartyLicenses/swift-fsrs-NOTICE.txt" "$APP_PATH/Contents/Resources/"
+cp "$PROJECT_ROOT/ThirdPartyLicenses/argmax-oss-swift-LICENSE.txt" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_ROOT/ThirdPartyLicenses/Flaticon-Stickers-ATTRIBUTION.md" "$APP_PATH/Contents/Resources/"
 xattr -cr "$APP_PATH"
 codesign --force --sign "$SIGN_IDENTITY" "$APP_PATH"

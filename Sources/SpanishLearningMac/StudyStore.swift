@@ -13,12 +13,17 @@ final class StudyStore: ObservableObject {
     @Published private(set) var transferInProgress = false
     @Published private(set) var activeTranscriptions: Set<UUID> = []
     @Published private(set) var transcriptionStatus: [UUID: String] = [:]
+    @Published private(set) var whisperDiagnostics: [UUID: String] = [:]
+    @Published private(set) var whisperModelInstalled = false
     private var transcriptionTasks: [UUID: Task<Void, Never>] = [:]
+    private let whisperTranscriptionService: WhisperKitTranscriptionService
 
     init(baseDirectory: URL? = nil) {
         let base = baseDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("SpanishLearningMac", isDirectory: true)
         supportDirectory = base
+        let modelCache = base.appendingPathComponent("Models/WhisperKit", isDirectory: true)
+        whisperTranscriptionService = WhisperKitTranscriptionService(cacheDirectory: modelCache)
         databaseURL = base.appendingPathComponent("study.json")
         mediaDirectory = base.appendingPathComponent("Media", isDirectory: true)
         do {
@@ -49,6 +54,7 @@ final class StudyStore: ObservableObject {
                     errorMessage = "阅读历史合并未能保存：\(error.localizedDescription)"
                 }
             }
+            whisperModelInstalled = whisperTranscriptionService.modelIsInstalled
         }
     }
 
@@ -69,14 +75,30 @@ final class StudyStore: ObservableObject {
     }
 
     func importSubtitles(from source: URL, materialID: UUID) throws {
-        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard canWrite else { throw StoreError.readOnly }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
         guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
-        let segments = try SubtitleImporter.parse(Data(contentsOf: source))
-        try setTranscript(materialID: materialID, segments: segments)
-        let previous = data.audioMaterials[index]
-        data.audioMaterials[index].transcriptionComplete = true
-        data.audioMaterials[index].transcribedThroughSeconds = segments.last?.endSeconds
-        do { try save() } catch { data.audioMaterials[index] = previous; throw error }
+        let cues = try SubtitleImporter.parse(Data(contentsOf: source))
+        let previous = data.audioMaterials[index].referenceSubtitleCues
+        let previousReliability = data.audioMaterials[index].subtitleReferenceReliable
+        let previousStatus = transcriptionStatus[materialID]
+        data.audioMaterials[index].referenceSubtitleCues = cues
+        data.audioMaterials[index].subtitleReferenceReliable = nil
+        if data.audioMaterials[index].transcriptionComplete == true,
+           !data.audioMaterials[index].sentences.isEmpty {
+            transcriptionStatus[materialID] =
+                "已导入 \(cues.count) 条字幕；点击“用字幕重新校准”将字幕设为练习句。"
+        } else {
+            transcriptionStatus.removeValue(forKey: materialID)
+        }
+        do { try save() } catch {
+            data.audioMaterials[index].referenceSubtitleCues = previous
+            data.audioMaterials[index].subtitleReferenceReliable = previousReliability
+            transcriptionStatus[materialID] = previousStatus
+            throw error
+        }
     }
 
     func generateAudioTitle(materialID: UUID) async throws {
@@ -99,27 +121,111 @@ final class StudyStore: ObservableObject {
     func startTranscription(materialID: UUID) throws {
         guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
         guard let material = data.audioMaterials.first(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
-        guard material.transcriptionComplete != true else { return }
-        guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }) else { throw StoreError.transcriptionLocked }
+        guard material.segmentationSource != .subtitle else { throw StoreError.transcriptionUsesSubtitles }
+        try startWhisperTranscription(
+            materialID: materialID,
+            replacingExistingSentences: false
+        )
+    }
+
+    func startWhisperSubtitleRecalibration(materialID: UUID) throws {
+        guard canRecalibrateSubtitles(materialID: materialID),
+              let material = data.audioMaterials.first(where: { $0.id == materialID }) else {
+            throw StoreError.transcriptionLocked
+        }
+        guard material.referenceSubtitleCues?.isEmpty == false else {
+            throw StoreError.subtitleReferenceRequiresSpeech
+        }
+        try startWhisperTranscription(
+            materialID: materialID,
+            replacingExistingSentences: true
+        )
+    }
+
+    private func startWhisperTranscription(
+        materialID: UUID,
+        replacingExistingSentences: Bool
+    ) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
+        guard let material = data.audioMaterials.first(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
+        if replacingExistingSentences {
+            guard material.referenceSubtitleCues?.isEmpty == false,
+                  material.segmentationSource == .speech,
+                  !material.sentences.isEmpty,
+                  !hasListeningHistory(materialID: materialID, sentences: material.sentences) else {
+                throw StoreError.transcriptionLocked
+            }
+        } else {
+            guard material.transcriptionComplete != true, material.sentences.isEmpty else {
+                throw StoreError.transcriptionLocked
+            }
+            guard !hasListeningHistory(materialID: materialID, sentences: material.sentences) else {
+                throw StoreError.transcriptionLocked
+            }
+        }
         let source = audioURL(for: material)
-        let offset = material.transcribedThroughSeconds ?? 0
         activeTranscriptions.insert(materialID)
-        transcriptionStatus[materialID] = "正在转写并保存进度…"
+        transcriptionStatus[materialID] = whisperModelInstalled
+            ? "正在准备本地转写模型…"
+            : "准备本地转写模型"
         transcriptionTasks[materialID] = Task {
             do {
-                try await TranscriptionService.transcribe(audioURL: source, startingAt: offset) { segments, through in
-                    try await MainActor.run {
-                        try self.appendTranscriptChunk(materialID: materialID, segments: segments, through: through)
-                        self.transcriptionStatus[materialID] = "已转写到 \(Int(through) / 60):\(String(format: "%02d", Int(through) % 60))，进度已保存。"
-                    }
+                let result = try await whisperTranscriptionService.transcribe(audioURL: source) { status in
+                    self.transcriptionStatus[materialID] = status
                 }
-                try completeTranscription(materialID: materialID)
-                transcriptionStatus[materialID] = "转写完成。请核对句子与时间，再开始听写。"
-                do { try await generateAudioTitle(materialID: materialID) }
-                catch { transcriptionStatus[materialID] = "转写已保存，标题生成失败：\(error.localizedDescription)" }
+                guard !Task.isCancelled else { throw CancellationError() }
+                whisperModelInstalled = whisperTranscriptionService.modelIsInstalled
+                let cues = data.audioMaterials.first(where: { $0.id == materialID })?.referenceSubtitleCues ?? []
+                let sentences: [ListeningSentence]
+                var subtitleTimingStatus = ""
+                if !cues.isEmpty {
+                    transcriptionStatus[materialID] = "正在校准字幕时间…"
+                    do {
+                        let alignment = try WhisperListeningPipeline.alignSubtitles(
+                            cues: cues,
+                            words: result.timestampedWords,
+                            audioDuration: result.audioDuration
+                        )
+                        sentences = alignment.sentences
+                        whisperDiagnostics[materialID] =
+                            "directWhisper=\(alignment.directCount); interpolated=\(alignment.interpolatedCount); originalSubtitle=\(alignment.originalCount); textConflicts=\(alignment.conflictCount); \(result.diagnostics.summary)"
+                        subtitleTimingStatus = alignment.originalCount == 0 ? "已校准" : "部分校准"
+                    } catch {
+                        sentences = try originalSubtitleSentences(cues: cues, audioDuration: result.audioDuration)
+                        subtitleTimingStatus = "部分校准"
+                        whisperDiagnostics[materialID] =
+                            "subtitleAlignmentFailed=true; \(result.diagnostics.summary)"
+                    }
+                } else {
+                    sentences = try WhisperListeningPipeline.sentencesWithoutSubtitles(
+                        segments: result.timestampedSegments,
+                        words: result.timestampedWords
+                    )
+                }
+                try commitWhisperTranscript(
+                    materialID: materialID,
+                    sentences: sentences,
+                    audioDuration: result.audioDuration,
+                    replacingExistingSentences: replacingExistingSentences,
+                    hasSubtitles: !cues.isEmpty
+                )
+                var message = !cues.isEmpty
+                    ? "\(sentences.count) 句 · 字幕时间\(subtitleTimingStatus)"
+                    : "转写完成（\(sentences.count) 句）"
+                if result.diagnostics.filteredCount > 0 {
+                    message += "；已过滤异常时间戳 \(result.diagnostics.filteredCount) 项"
+                    whisperDiagnostics[materialID] = result.diagnostics.summary
+                }
+                message += String(format: "；用时 %.1f 秒", result.elapsedSeconds)
+                transcriptionStatus[materialID] = message
             } catch is CancellationError {
-                transcriptionStatus[materialID] = "已暂停；下次可从已保存的位置继续。"
+                transcriptionStatus[materialID] = "已暂停；尚未更改现有句子。"
             } catch {
+                whisperModelInstalled = whisperTranscriptionService.modelIsInstalled
                 transcriptionStatus[materialID] = error.localizedDescription
             }
             activeTranscriptions.remove(materialID)
@@ -127,36 +233,343 @@ final class StudyStore: ObservableObject {
         }
     }
 
+    private func commitWhisperTranscript(
+        materialID: UUID,
+        sentences: [ListeningSentence],
+        audioDuration: Double,
+        replacingExistingSentences: Bool,
+        hasSubtitles: Bool
+    ) throws {
+        guard canWrite, !transferInProgress,
+              let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
+        let existing = data.audioMaterials[index]
+        if replacingExistingSentences {
+            guard existing.segmentationSource == .speech,
+                  !hasListeningHistory(materialID: materialID, sentences: existing.sentences) else {
+                throw StoreError.transcriptionLocked
+            }
+        } else {
+            guard existing.sentences.isEmpty,
+                  !hasListeningHistory(materialID: materialID, sentences: existing.sentences) else {
+                throw StoreError.transcriptionLocked
+            }
+        }
+        guard !sentences.isEmpty,
+              sentences.allSatisfy({
+                  $0.startSeconds.isFinite && $0.endSeconds.isFinite &&
+                      $0.startSeconds >= 0 && $0.endSeconds > $0.startSeconds &&
+                      $0.endSeconds <= audioDuration + 0.05
+              }) else {
+            throw StoreError.invalidSentence
+        }
+        let previous = existing
+        data.audioMaterials[index].sentences = sentences
+        data.audioMaterials[index].segmentationSource = hasSubtitles ? .subtitleCalibrated : .speech
+        data.audioMaterials[index].transcribedThroughSeconds = audioDuration
+        data.audioMaterials[index].transcriptionComplete = true
+        data.audioMaterials[index].speechTimingAnchors = nil
+        do {
+            try save()
+        } catch {
+            data.audioMaterials[index] = previous
+            throw error
+        }
+    }
+
+    private func originalSubtitleSentences(
+        cues: [SubtitleCue],
+        audioDuration: Double
+    ) throws -> [ListeningSentence] {
+        try cues.enumerated().map { index, cue in
+            let start = max(0, cue.startSeconds)
+            let end = min(audioDuration, cue.endSeconds)
+            guard start.isFinite, end.isFinite, start < end else {
+                throw WhisperPipelineError.invalidFinalTiming
+            }
+            return ListeningSentence(
+                id: UUID(),
+                ordinal: index + 1,
+                startSeconds: start,
+                endSeconds: end,
+                transcript: cue.text,
+                status: .generated,
+                version: 1,
+                referenceSubtitleText: cue.text,
+                timingSource: .subtitleOriginal,
+                timingConfidence: .low,
+                whisperTimingMethod: .originalSubtitle
+            )
+        }
+    }
+
+    func canRecalibrateSubtitles(materialID: UUID) -> Bool {
+        guard canWrite, !transferInProgress,
+              let material = data.audioMaterials.first(where: { $0.id == materialID }),
+              material.referenceSubtitleCues?.isEmpty == false,
+              material.segmentationSource == .speech,
+              !material.sentences.isEmpty,
+              !activeTranscriptions.contains(materialID) else { return false }
+        return !hasListeningHistory(materialID: materialID, sentences: material.sentences)
+    }
+
+    func startSubtitleCalibration(materialID: UUID) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard !activeTranscriptions.contains(materialID) else { throw BackupError.busy }
+        guard canRecalibrateSubtitles(materialID: materialID),
+              let material = data.audioMaterials.first(where: { $0.id == materialID }) else {
+            throw StoreError.transcriptionLocked
+        }
+        let source = audioURL(for: material)
+        let previousAnchors = material.speechTimingAnchors
+        let previousOffset = material.transcribedThroughSeconds
+        let previousCompletion = material.transcriptionComplete
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
+        data.audioMaterials[index].speechTimingAnchors = nil
+        data.audioMaterials[index].transcribedThroughSeconds = nil
+        data.audioMaterials[index].transcriptionComplete = false
+        do { try save() } catch {
+            data.audioMaterials[index].speechTimingAnchors = previousAnchors
+            data.audioMaterials[index].transcribedThroughSeconds = previousOffset
+            data.audioMaterials[index].transcriptionComplete = previousCompletion
+            throw error
+        }
+        try beginTranscription(materialID: materialID, source: source, offset: 0,
+                               hasTimedSubtitles: true, replacingSpeechSentences: true,
+                               generateTitleAfterCompletion: false,
+                               restoreOnFailure: (previousAnchors, previousOffset, previousCompletion))
+    }
+
+    private func beginTranscription(materialID: UUID, source: URL, offset: Double,
+                                    hasTimedSubtitles: Bool, replacingSpeechSentences: Bool,
+                                    generateTitleAfterCompletion: Bool,
+                                    restoreOnFailure: (anchors: [SpeechTimingAnchor]?, offset: Double?,
+                                                       completion: Bool?)? = nil) throws {
+        activeTranscriptions.insert(materialID)
+        transcriptionStatus[materialID] = hasTimedSubtitles
+            ? "正在识别音频锚点并校准字幕…"
+            : "正在转写并保存进度…"
+        transcriptionTasks[materialID] = Task {
+            await performTranscription(materialID: materialID, source: source, offset: offset,
+                                       hasTimedSubtitles: hasTimedSubtitles,
+                                       replacingSpeechSentences: replacingSpeechSentences,
+                                       generateTitleAfterCompletion: generateTitleAfterCompletion,
+                                       restoreOnFailure: restoreOnFailure)
+        }
+    }
+
+    private func performTranscription(materialID: UUID, source: URL, offset: Double,
+                                      hasTimedSubtitles: Bool, replacingSpeechSentences: Bool,
+                                      generateTitleAfterCompletion: Bool,
+                                      restoreOnFailure: (anchors: [SpeechTimingAnchor]?, offset: Double?,
+                                                         completion: Bool?)?) async {
+        do {
+            let onChunk: @Sendable ([ListeningSentence], Double) async throws -> Void = { segments, through in
+                try await MainActor.run {
+                    if !hasTimedSubtitles {
+                        try self.appendTranscriptChunk(materialID: materialID, segments: segments, through: through)
+                    }
+                    self.transcriptionStatus[materialID] =
+                        "已转写到 \(Int(through) / 60):\(String(format: "%02d", Int(through) % 60))，进度已保存。"
+                }
+            }
+            var rawHandler: (@Sendable ([NativeSpeechSegment], Double) async throws -> Void)?
+            if hasTimedSubtitles {
+                rawHandler = { segments, through in
+                    let anchors = segments.map {
+                        SpeechTimingAnchor(text: $0.substring, startSeconds: $0.timestamp,
+                                           endSeconds: $0.end)
+                    }
+                    try await self.appendSpeechTimingAnchors(
+                        materialID: materialID, segments: anchors, through: through
+                    )
+                }
+            }
+            let summary = try await TranscriptionService.transcribe(
+                audioURL: source, startingAt: offset, onChunk: onChunk, onRawSegments: rawHandler
+            )
+            if hasTimedSubtitles {
+                try applySubtitleTimingCalibration(
+                    materialID: materialID,
+                    audioDuration: summary.processedThroughSeconds,
+                    replacingSpeechSentences: replacingSpeechSentences
+                )
+            }
+            if !hasTimedSubtitles {
+                try completeTranscription(materialID: materialID)
+            }
+            if hasTimedSubtitles {
+                let calibrated = data.audioMaterials.first(where: { $0.id == materialID })?
+                    .sentences.filter { $0.timingSource == .speechCalibrated }.count ?? 0
+                let total = data.audioMaterials.first(where: { $0.id == materialID })?.sentences.count ?? 0
+                transcriptionStatus[materialID] =
+                    "字幕 + 本机音频校准完成（\(calibrated)/\(total) 句已校准；\(summary.noSpeechChunkCount) 个无语音块跳过）。"
+            } else {
+                transcriptionStatus[materialID] =
+                    "本机转写完成（\(summary.successfulChunkCount)/\(summary.chunkCount) 个音频块成功，\(summary.noSpeechChunkCount) 个无语音块跳过）。"
+                if generateTitleAfterCompletion {
+                    do { try await generateAudioTitle(materialID: materialID) }
+                    catch { transcriptionStatus[materialID] = "转写已保存，标题生成失败：\(error.localizedDescription)" }
+                }
+            }
+        } catch is CancellationError {
+            let restoreError = restoreSubtitleCalibrationState(materialID: materialID, state: restoreOnFailure)
+            transcriptionStatus[materialID] = restoreError.map {
+                "已暂停；恢复原转写状态失败：\($0)"
+            } ?? "已暂停；下次可从已保存的位置继续。"
+        } catch {
+            let restoreError = restoreSubtitleCalibrationState(materialID: materialID, state: restoreOnFailure)
+            let failure = replacingSpeechSentences
+                ? "字幕校准失败，原有 Speech 句子已保留：\(error.localizedDescription)"
+                : error.localizedDescription
+            transcriptionStatus[materialID] = restoreError.map { "\(failure)；恢复状态失败：\($0)" } ?? failure
+        }
+        activeTranscriptions.remove(materialID)
+        transcriptionTasks.removeValue(forKey: materialID)
+    }
+
     func pauseTranscription(materialID: UUID) {
         transcriptionTasks[materialID]?.cancel()
     }
 
-    func setTranscript(materialID: UUID, segments: [ListeningSentence]) throws {
+    func setTranscript(materialID: UUID, segments: [ListeningSentence],
+                       segmentationSource: ListeningSegmentationSource? = nil) throws {
         guard canWrite else { throw StoreError.readOnly }
         guard !transferInProgress else { throw BackupError.busy }
         guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
         guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }),
               !data.cards.contains(where: { card in card.sources.contains { $0.materialID == materialID } })
         else { throw StoreError.transcriptionLocked }
-        let previous = data.audioMaterials[index].sentences
+        let previous = data.audioMaterials[index]
         data.audioMaterials[index].sentences = segments
-        do { try save() } catch { data.audioMaterials[index].sentences = previous; throw error }
+        if let segmentationSource {
+            data.audioMaterials[index].segmentationSource = segmentationSource
+            data.audioMaterials[index].transcriptionComplete = true
+            data.audioMaterials[index].transcribedThroughSeconds = segments.last?.endSeconds
+        }
+        do {
+            try save()
+            if segmentationSource == .subtitle {
+                transcriptionStatus.removeValue(forKey: materialID)
+            }
+        } catch {
+            data.audioMaterials[index] = previous
+            throw error
+        }
+    }
+
+    func applySubtitleTimingCalibration(materialID: UUID, audioDuration: Double,
+                                        replacingSpeechSentences: Bool = false) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }),
+              let cues = data.audioMaterials[index].referenceSubtitleCues,
+              !cues.isEmpty,
+              data.audioMaterials[index].segmentationSource != .subtitle else { return }
+        let existingSentences = data.audioMaterials[index].sentences
+        if replacingSpeechSentences {
+            guard data.audioMaterials[index].segmentationSource == .speech,
+                  !existingSentences.isEmpty,
+                  !hasListeningHistory(materialID: materialID, sentences: existingSentences) else {
+                throw StoreError.transcriptionLocked
+            }
+        } else {
+            guard existingSentences.isEmpty else { throw StoreError.transcriptionLocked }
+        }
+        guard audioDuration.isFinite, audioDuration > 0 else { throw StoreError.invalidSentence }
+        let originalMaterial = data.audioMaterials[index]
+        let calibration = ListeningSubtitleAligner.SubtitleTimingCalibrator.calibrate(
+            cues: cues, speech: originalMaterial.speechTimingAnchors ?? [],
+            audioDuration: audioDuration
+        )
+        let previous = data.audioMaterials[index]
+        data.audioMaterials[index].sentences = calibration.sentences
+        data.audioMaterials[index].segmentationSource = .subtitleCalibrated
+        data.audioMaterials[index].transcriptionComplete = true
+        do { try save() } catch {
+            data.audioMaterials[index] = previous
+            throw error
+        }
+    }
+
+    @discardableResult
+    private func restoreSubtitleCalibrationState(
+        materialID: UUID,
+        state: (anchors: [SpeechTimingAnchor]?, offset: Double?, completion: Bool?)?
+    ) -> String? {
+        guard let state else { return nil }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else {
+            return StoreError.missingMaterial.localizedDescription
+        }
+        let previous = data.audioMaterials[index]
+        data.audioMaterials[index].speechTimingAnchors = state.anchors
+        data.audioMaterials[index].transcribedThroughSeconds = state.offset
+        data.audioMaterials[index].transcriptionComplete = state.completion
+        do {
+            try save()
+            return nil
+        } catch {
+            data.audioMaterials[index] = previous
+            return error.localizedDescription
+        }
+    }
+
+    private func hasListeningHistory(materialID: UUID, sentences: [ListeningSentence]) -> Bool {
+        data.dictationAttempts.contains { $0.materialID == materialID } ||
+            data.cards.contains { card in card.sources.contains { $0.materialID == materialID } } ||
+            data.writingExercises.contains { $0.sourceID == materialID } ||
+            sentences.contains {
+                $0.status != .generated || $0.draftText != nil || $0.answerRevealed == true ||
+                    $0.analysis != nil || !($0.learningPoints ?? []).isEmpty
+            }
+    }
+
+    func appendSpeechTimingAnchors(materialID: UUID, segments: [SpeechTimingAnchor],
+                                   through seconds: Double) throws {
+        guard canWrite else { throw StoreError.readOnly }
+        guard !transferInProgress else { throw BackupError.busy }
+        guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else {
+            throw StoreError.missingMaterial
+        }
+        guard data.audioMaterials[index].referenceSubtitleCues?.isEmpty == false,
+              data.audioMaterials[index].segmentationSource != .subtitle else {
+            throw StoreError.transcriptionUsesSubtitles
+        }
+        guard !hasListeningHistory(materialID: materialID,
+                                   sentences: data.audioMaterials[index].sentences) else {
+            throw StoreError.transcriptionLocked
+        }
+        let previous = data.audioMaterials[index]
+        data.audioMaterials[index].speechTimingAnchors =
+            (data.audioMaterials[index].speechTimingAnchors ?? []) + segments
+        data.audioMaterials[index].transcribedThroughSeconds = seconds
+        data.audioMaterials[index].transcriptionComplete = false
+        do { try save() } catch { data.audioMaterials[index] = previous; throw error }
     }
 
     func appendTranscriptChunk(materialID: UUID, segments: [ListeningSentence], through seconds: Double) throws {
         guard canWrite else { throw StoreError.readOnly }
         guard !transferInProgress else { throw BackupError.busy }
         guard let index = data.audioMaterials.firstIndex(where: { $0.id == materialID }) else { throw StoreError.missingMaterial }
+        guard data.audioMaterials[index].segmentationSource != .subtitle else {
+            throw StoreError.transcriptionUsesSubtitles
+        }
         guard !data.dictationAttempts.contains(where: { $0.materialID == materialID }) else { throw StoreError.transcriptionLocked }
         let previous = data.audioMaterials[index]
         let current = previous.sentences.count
         data.audioMaterials[index].sentences += segments.enumerated().map { offset, segment in
             var numbered = segment
             numbered.ordinal = current + offset + 1
+            if numbered.rawSpeechText == nil { numbered.rawSpeechText = numbered.transcript }
             return numbered
         }
         data.audioMaterials[index].transcribedThroughSeconds = seconds
         data.audioMaterials[index].transcriptionComplete = false
+        data.audioMaterials[index].segmentationSource = .speech
         do { try save() } catch { data.audioMaterials[index] = previous; throw error }
     }
 
@@ -856,6 +1269,8 @@ enum StoreError: LocalizedError {
     case invalidSentence
     case transcriptionLocked
     case transcriptionIncomplete
+    case transcriptionUsesSubtitles
+    case subtitleReferenceRequiresSpeech
     case sentenceReferenced
     case noSpeech
     case missingCard
@@ -877,6 +1292,8 @@ enum StoreError: LocalizedError {
         case .invalidSentence: "请检查句子文本和起止时间。"
         case .transcriptionLocked: "已有听写记录，不能重新覆盖整份转写。你仍可逐句修正。"
         case .transcriptionIncomplete: "请等整段音频转写完成后再确认。"
+        case .transcriptionUsesSubtitles: "此素材已使用字幕时间轴，不会再运行本机转写。"
+        case .subtitleReferenceRequiresSpeech: "字幕只作为文字参考；请先运行本机语音识别生成音频时间轴。"
         case .sentenceReferenced: "这句话已有听写或卡片记录，不能改变切句。仍可修改文字和时间。"
         case .noSpeech: "这段音频没有识别出西语语音。请检查音频后重试。"
         case .missingCard: "找不到这张卡片。"

@@ -397,6 +397,11 @@ struct ReadingView: View {
         catch { status = error.localizedDescription; return }
         working = true
         status = "正在把本段提问整理为详细卡片草稿…"
+        // Freeze the difficulty/note the user chose for THIS chunk before the AI round-trip;
+        // otherwise a slow response would read whatever difficulty/note the UI shows later
+        // (e.g. after navigating to a different chunk) and write it into this chunk's record.
+        let requestedDifficulty = difficulty
+        let requestedNote = note
         Task {
             do {
                 let result = try await ReadingAIService.organizeCards(articleTitle: article.title,
@@ -423,7 +428,7 @@ struct ReadingView: View {
                 }
                 let auditedResult = ReadingCardsResult(cards: auditedCards)
                 try store.completeReadingWithCards(articleID: article.id, chunkID: chunk.id,
-                                                   difficulty: difficulty, note: note, result: auditedResult)
+                                                   difficulty: requestedDifficulty, note: requestedNote, result: auditedResult)
                 let count = result.cards.filter(\.create).count
                 status = fallbackCount == 0
                     ? "本段阅读已完成，新增整理 \(count) 个卡片要点。"

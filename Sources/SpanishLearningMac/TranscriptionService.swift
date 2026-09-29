@@ -52,6 +52,18 @@ struct NativeSpeechSegment: Equatable, Sendable {
     let duration: Double
 
     var end: Double { timestamp + max(0, duration) }
+
+    func globalized(by chunkStart: Double) -> NativeSpeechSegment {
+        NativeSpeechSegment(substring: substring, timestamp: chunkStart + timestamp, duration: duration)
+    }
+}
+
+struct TranscriptionRunSummary: Equatable, Sendable {
+    var chunkCount = 0
+    var successfulChunkCount = 0
+    var noSpeechChunkCount = 0
+    var rawSegmentCount = 0
+    var processedThroughSeconds = 0.0
 }
 
 struct NativeSpeechSentenceSegmenter {
@@ -173,14 +185,17 @@ struct NativeSpeechSentenceSegmenter {
         let start = max(lastEmittedEnd ?? 0, max(0, rawStart))
         let end = max(start + 0.001, rawEnd)
         lastEmittedEnd = end
+        let transcript = group.map(\.substring).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return ListeningSentence(
             id: UUID(),
             ordinal: 0,
             startSeconds: start,
             endSeconds: end,
-            transcript: group.map(\.substring).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines),
+            transcript: transcript,
             status: .generated,
-            version: 1
+            version: 1,
+            rawSpeechText: transcript
         )
     }
 }
@@ -226,7 +241,8 @@ enum TranscriptionService {
     }
 
     static func transcribe(audioURL: URL, startingAt start: Double = 0,
-                           onChunk: @escaping @Sendable ([ListeningSentence], Double) async throws -> Void) async throws {
+                           onChunk: @escaping @Sendable ([ListeningSentence], Double) async throws -> Void,
+                           onRawSegments: (@Sendable ([NativeSpeechSegment], Double) async throws -> Void)? = nil) async throws -> TranscriptionRunSummary {
         guard Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil else {
             throw TranscriptionError.missingUsageDescription
         }
@@ -247,19 +263,36 @@ enum TranscriptionService {
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         var offset = start
         var segmenter = NativeSpeechSentenceSegmenter()
+        var summary = TranscriptionRunSummary()
+        summary.processedThroughSeconds = start
         while let chunk = try AudioChunker.next(audioURL, after: offset, into: work) {
             try Task.checkCancellation()
-            let result = try await recognize(chunk.url, with: recognizer)
-            try Task.checkCancellation()
-            let segments = result.bestTranscription.segments.map {
-                NativeSpeechSegment(
-                    substring: $0.substring,
-                    timestamp: chunk.offset + $0.timestamp,
-                    duration: $0.duration
-                )
+            summary.chunkCount += 1
+            let result: SFSpeechRecognitionResult
+            do {
+                result = try await recognize(chunk.url, with: recognizer)
+            } catch {
+                guard isNoSpeechError(error) else { throw error }
+                let through = chunk.offset + chunk.duration
+                summary.noSpeechChunkCount += 1
+                summary.processedThroughSeconds = through
+                try await onRawSegments?([], through)
+                try await onChunk([], through)
+                try? FileManager.default.removeItem(at: chunk.url)
+                offset = through
+                continue
             }
-            let sentences = segmenter.consume(segments)
+            try Task.checkCancellation()
+            summary.successfulChunkCount += 1
+            summary.rawSegmentCount += result.bestTranscription.segments.count
+            let segments = result.bestTranscription.segments.map {
+                NativeSpeechSegment(substring: $0.substring, timestamp: $0.timestamp,
+                                    duration: $0.duration).globalized(by: chunk.offset)
+            }
             let through = chunk.offset + chunk.duration
+            summary.processedThroughSeconds = through
+            try await onRawSegments?(segments, through)
+            let sentences = segmenter.consume(segments)
             try await onChunk(sentences, through)
             try? FileManager.default.removeItem(at: chunk.url)
             offset = through
@@ -268,6 +301,12 @@ enum TranscriptionService {
         if !finalSentences.isEmpty {
             try await onChunk(finalSentences, offset)
         }
+        return summary
+    }
+
+    static func isNoSpeechError(_ error: Error) -> Bool {
+        let speechError = error as NSError
+        return speechError.domain == "kAFAssistantErrorDomain" && speechError.code == 1110
     }
 
     private static func recognize(_ url: URL, with recognizer: SFSpeechRecognizer) async throws -> SFSpeechRecognitionResult {

@@ -11,6 +11,28 @@ struct StudyDatabase: Codable {
     var reviewEvents: [ReviewEvent] = []
 }
 
+enum ListeningSegmentationSource: String, Codable {
+    case subtitle
+    case speech
+    case subtitleCalibrated
+}
+
+enum ListeningTimingSource: String, Codable {
+    case subtitleOriginal
+    case speechCalibrated
+    case speechNative
+}
+
+enum WhisperTimingMethod: String, Codable {
+    case directWhisper
+    case interpolated
+    case originalSubtitle
+}
+
+enum ListeningTimingConfidence: String, Codable {
+    case low, medium, high
+}
+
 struct AudioMaterial: Codable, Identifiable {
     var id: UUID
     var title: String
@@ -19,6 +41,24 @@ struct AudioMaterial: Codable, Identifiable {
     var sentences: [ListeningSentence] = []
     var transcribedThroughSeconds: Double? = nil
     var transcriptionComplete: Bool? = nil
+    var segmentationSource: ListeningSegmentationSource? = nil
+    var referenceSubtitleCues: [SubtitleCue]? = nil
+    var subtitleReferenceReliable: Bool? = nil
+    var speechTimingAnchors: [SpeechTimingAnchor]? = nil
+}
+
+struct SubtitleCue: Codable, Identifiable, Sendable {
+    var id: UUID
+    var ordinal: Int
+    var startSeconds: Double
+    var endSeconds: Double
+    var text: String
+}
+
+struct SpeechTimingAnchor: Codable, Sendable {
+    var text: String
+    var startSeconds: Double
+    var endSeconds: Double
 }
 
 enum TranscriptStatus: String, Codable {
@@ -69,6 +109,12 @@ struct ListeningSentence: Codable, Identifiable {
     var answerRevealed: Bool? = nil
     var analysis: ListeningAnalysis? = nil
     var learningPoints: [ListeningLearningPoint]? = nil
+    var rawSpeechText: String? = nil
+    var referenceSubtitleText: String? = nil
+    var timingSource: ListeningTimingSource? = nil
+    var timingConfidence: ListeningTimingConfidence? = nil
+    var whisperTimingMethod: WhisperTimingMethod? = nil
+    var textConflict: Bool? = nil
 }
 
 struct ReadingArticle: Codable, Identifiable {

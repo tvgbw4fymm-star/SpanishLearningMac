@@ -505,16 +505,25 @@ struct WritingView: View {
         do { key = try AIProviderSettings.textKey() ?? "" }
         catch { notice = error.localizedDescription; return }
         guard !key.isEmpty else { notice = AIProviderError.missingKey.localizedDescription; return }
-        let source = mode == .material ? selectedSource : nil
+        let requestedMode = mode
+        let source = requestedMode == .material ? selectedSource : nil
+        let requestedReferenceSpanish = requestedMode == .material ? referenceSpanish : nil
+        let requestedFocus = focus
+        let requestedContext = WritingSubmissionContext(
+            exerciseID: selectedExerciseID, mode: requestedMode, prompt: prompt,
+            learnerSpanish: spanish, sourceID: source?.materialID,
+            sourceSegmentID: source?.segmentID, sourceQuote: source?.text,
+            referenceSpanish: requestedReferenceSpanish, focus: requestedFocus
+        )
         working = true
         notice = "正在检查意思、语法、用词和自然度…"
         Task {
             do {
                 let evaluated = try await WritingAIService.evaluate(chinesePrompt: prompt,
-                                                                     referenceSpanish: mode == .material ? referenceSpanish : nil,
+                                                                     referenceSpanish: requestedReferenceSpanish,
                                                                      sourceSpanish: source?.text,
                                                                      learnerSpanish: spanish,
-                                                                     mode: mode, apiKey: key)
+                                                                     mode: requestedMode, apiKey: key)
                 var audited = evaluated
                 var usedCardFallback = false
                 if evaluated.card.create {
@@ -534,31 +543,58 @@ struct WritingView: View {
                         : "正在保存反馈…"
                     isAuditingCards = false
                 }
-                let saved = try store.saveWritingFeedback(exerciseID: selectedExerciseID,
-                                                           mode: mode,
+                let saved = try store.saveWritingFeedback(exerciseID: requestedContext.exerciseID,
+                                                           mode: requestedMode,
                                                            sourceID: source?.materialID,
                                                            sourceSegmentID: source?.segmentID,
                                                            sourceQuote: source?.text,
                                                            chinesePrompt: prompt,
-                                                           referenceSpanish: mode == .material ? referenceSpanish : nil,
-                                                           focus: focus.isEmpty ? nil : focus,
+                                                           referenceSpanish: requestedReferenceSpanish,
+                                                           focus: requestedFocus.isEmpty ? nil : requestedFocus,
                                                            learnerSpanish: spanish,
                                                            result: audited)
-                selectedExerciseID = saved.exerciseID
-                feedback = WritingFeedbackDisplay(feedback: audited.feedback,
-                                                  correctedSpanish: audited.correctedSpanish,
-                                                  meaning: audited.scores.meaning,
-                                                  grammar: audited.scores.grammar,
-                                                  wording: audited.scores.wording,
-                                                  naturalness: audited.scores.naturalness,
-                                                  errors: audited.errors.map {
-                    WritingError(id: UUID(), original: $0.original,
-                                 correction: $0.correction, explanation: $0.explanation)
-                }, createdCard: saved.cardID != nil)
-                notice = usedCardFallback
-                    ? "反馈已保存；AI 卡片整理失败，当前使用基础整理版本，可在卡片详情中重试。"
-                    : (saved.cardID == nil ? "反馈和本次版本已保存。" : "反馈已保存，并生成了待确认的纠错卡片。")
-            } catch { notice = error.localizedDescription }
+                let currentSource = mode == .material ? selectedSource : nil
+                let currentReferenceSpanish = mode == .material ? referenceSpanish : nil
+                let currentContext = WritingSubmissionContext(
+                    exerciseID: selectedExerciseID, mode: mode,
+                    prompt: chinesePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                    learnerSpanish: learnerSpanish.trimmingCharacters(in: .whitespacesAndNewlines),
+                    sourceID: currentSource?.materialID, sourceSegmentID: currentSource?.segmentID,
+                    sourceQuote: currentSource?.text,
+                    referenceSpanish: currentReferenceSpanish, focus: focus
+                )
+                let stillShowingSubmittedContext = currentContext == requestedContext
+                if stillShowingSubmittedContext {
+                    selectedExerciseID = saved.exerciseID
+                    feedback = WritingFeedbackDisplay(feedback: audited.feedback,
+                                                      correctedSpanish: audited.correctedSpanish,
+                                                      meaning: audited.scores.meaning,
+                                                      grammar: audited.scores.grammar,
+                                                      wording: audited.scores.wording,
+                                                      naturalness: audited.scores.naturalness,
+                                                      errors: audited.errors.map {
+                        WritingError(id: UUID(), original: $0.original,
+                                     correction: $0.correction, explanation: $0.explanation)
+                    }, createdCard: saved.cardID != nil)
+                    notice = usedCardFallback
+                        ? "反馈已保存；AI 卡片整理失败，当前使用基础整理版本，可在卡片详情中重试。"
+                        : (saved.cardID == nil ? "反馈和本次版本已保存。" : "反馈已保存，并生成了待确认的纠错卡片。")
+                }
+            } catch {
+                let currentSource = mode == .material ? selectedSource : nil
+                let currentReferenceSpanish = mode == .material ? referenceSpanish : nil
+                let currentContext = WritingSubmissionContext(
+                    exerciseID: selectedExerciseID, mode: mode,
+                    prompt: chinesePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+                    learnerSpanish: learnerSpanish.trimmingCharacters(in: .whitespacesAndNewlines),
+                    sourceID: currentSource?.materialID, sourceSegmentID: currentSource?.segmentID,
+                    sourceQuote: currentSource?.text,
+                    referenceSpanish: currentReferenceSpanish, focus: focus
+                )
+                if currentContext == requestedContext {
+                    notice = error.localizedDescription
+                }
+            }
             isAuditingCards = false
             working = false
         }
