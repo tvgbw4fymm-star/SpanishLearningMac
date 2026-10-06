@@ -55,7 +55,7 @@ struct ListeningView: View {
     @State private var isGeneratingCards = false
     @State private var isAuditingCards = false
     @State private var showPasteSubtitles = false
-    @State private var showInspector = true
+    @State private var hoveredSentenceID: UUID?
     @FocusState private var dictationIsFocused: Bool
 
     private var material: AudioMaterial? {
@@ -69,18 +69,55 @@ struct ListeningView: View {
     var body: some View {
         Group {
             if let material {
-                HSplitView {
-                    listeningNavigator(material)
-                        .frame(minWidth: 210, idealWidth: 250, maxWidth: 310)
-                    studyCanvas(material)
-                        .frame(minWidth: 400, idealWidth: 560, maxWidth: .infinity,
-                               maxHeight: .infinity)
+                HStack(alignment: .top, spacing: 24) {
+                        listeningNavigator(material)
+                            .padding(14)
+                            .frame(minWidth: 205, idealWidth: 235, maxWidth: 285, maxHeight: .infinity)
+                            .background {
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                            .fill(LinearGradient(
+                                                colors: [
+                                                    GlassTheme.cyan.opacity(0.10),
+                                                    GlassTheme.violet.opacity(0.08)
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                    }
+                            }
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                            }
+
+                        studyCanvas(material)
+                            .padding(18)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background {
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                            .fill(LinearGradient(
+                                                colors: [
+                                                    GlassTheme.violet.opacity(0.15),
+                                                    GlassTheme.cyan.opacity(0.10)
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ))
+                                    }
+                            }
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                            }
                 }
-                .background(AppPalette.canvas)
-                .inspector(isPresented: $showInspector) {
-                    learningInspector(material)
-                        .inspectorColumnWidth(min: 250, ideal: 300, max: 380)
-                }
+                .padding(12)
+                .background(AppGlassBackground())
             } else {
                 emptyLibrary
             }
@@ -126,50 +163,6 @@ struct ListeningView: View {
         .sheet(isPresented: $showPasteSubtitles) {
             if let material { PasteSubtitleSheet(materialID: material.id) }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if let material {
-                    if isReviewingTranscript {
-                        Button("返回练习", systemImage: "arrow.uturn.backward") {
-                            exitTranscriptReview()
-                        }
-                        Button("完成核对", systemImage: "checkmark.circle") {
-                            completeTranscriptReview(material)
-                        }
-                        .disabled(material.transcriptionComplete != true || hasOtherTranscriptReviewDrafts(material))
-                        .help(reviewCompletionHelp(material))
-                    } else {
-                        Button("核对分句", systemImage: "text.badge.checkmark") {
-                            enterTranscriptReview()
-                        }
-                        .disabled(material.sentences.isEmpty)
-                    }
-                }
-                Menu {
-                    Button("导入音频或视频…", systemImage: "plus") { importMedia() }
-                    if let material {
-                        Divider()
-                        Button("导入字幕文件…", systemImage: "captions.bubble") {
-                            importSubtitles(material)
-                        }
-                        .disabled(store.activeTranscriptions.contains(material.id))
-                        Button("粘贴字幕…", systemImage: "doc.on.clipboard") {
-                            showPasteSubtitles = true
-                        }
-                    }
-                } label: {
-                    Label("材料", systemImage: "ellipsis.circle")
-                }
-                .help("导入或管理听力材料")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Toggle(isOn: $showInspector) {
-                    Label("学习检查器", systemImage: "sidebar.trailing")
-                }
-                .toggleStyle(.button)
-                .help(showInspector ? "隐藏学习检查器" : "显示学习检查器")
-            }
-        }
     }
 
     private var emptyLibrary: some View {
@@ -179,20 +172,20 @@ struct ListeningView: View {
             Text("导入本机音频或视频。转写和学习资料保留在这台 Mac 上。")
         } actions: {
             Button("导入音频或视频…", systemImage: "plus") { importMedia() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(AppActionButtonStyle(prominent: true))
             Button("导入字幕文件…", systemImage: "captions.bubble") {
                 status = "请先导入音频，再为对应语料导入字幕文件或粘贴字幕。"
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(AppActionButtonStyle())
             Text("支持 MP3、M4A、WAV、MP4、MOV，以及 SRT / VTT 字幕。")
-                .font(.callout)
+                .font(AppType.supporting)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .bottom) {
             if let status {
                 Text(status)
-                    .font(.callout)
+                    .font(AppType.supporting)
                     .foregroundStyle(.secondary)
                     .padding()
             }
@@ -209,103 +202,150 @@ struct ListeningView: View {
                             .tag(Optional(item.id))
                     }
                 }
-                .pickerStyle(.menu)
                 .labelsHidden()
                 .accessibilityLabel("当前媒体")
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .studyPickerChrome()
 
                 Button(action: importMedia) {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(AppActionButtonStyle())
                 .help("导入音频或视频")
                 .accessibilityLabel("导入音频或视频")
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
+            .padding(.horizontal, 4)
+            .padding(.top, 4)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(material.title)
-                    .font(AppType.ui(13, weight: .semibold))
-                    .lineLimit(2)
-                Label("\(material.sentences.count) 句 · \(materialState(material))",
-                      systemImage: materialStateSymbol(material))
-                    .font(AppType.caption)
+            Label("\(material.sentences.count) 句 · \(materialState(material))",
+                  systemImage: materialStateSymbol(material))
+                    .font(AppType.supporting)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-            }
-            .padding(.horizontal, 14)
+                    .padding(.horizontal, 4)
 
             Divider()
+                .padding(.vertical, 2)
 
             HStack(alignment: .firstTextBaseline) {
                 Text("句子")
-                    .font(AppType.ui(13, weight: .semibold))
+                    .font(AppType.sectionTitle)
                 Spacer()
                 Text("\(material.sentences.count)")
-                    .font(.system(.caption, design: .rounded).monospacedDigit())
+                    .font(AppType.supporting.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 4)
 
             if material.sentences.isEmpty {
                 ContentUnavailableView("尚无句子", systemImage: "text.alignleft",
                                        description: Text("导入字幕或开始本机转写后，句子会显示在这里。"))
-                    .font(.callout)
+                    .font(AppType.supporting)
             } else {
-                List(selection: $selectedSentenceID) {
-                    ForEach(material.sentences) { item in
-                        HStack(alignment: .top, spacing: 8) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(spacing: 6) {
-                                    Text("句子 \(item.ordinal)")
-                                        .font(AppType.ui(12, weight: .medium))
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(material.sentences) { item in
+                            Button {
+                                selectedSentenceID = item.id
+                            } label: {
+                                HStack(alignment: .top, spacing: 10) {
+                                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                        .fill(item.id == selectedSentenceID ? GlassTheme.cyan.opacity(0.85) : .clear)
+                                        .frame(width: 3, height: 30)
+                                    VStack(alignment: .leading, spacing: 7) {
+                                        HStack(spacing: 8) {
+                                            Text("句子 \(item.ordinal)")
+                                                .font(AppType.ui(14, weight: .semibold))
+                                                .foregroundStyle(.primary)
+                                            Spacer(minLength: 0)
+                                            Label(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID),
+                                                  systemImage: sentenceStateSymbol(item))
+                                                .font(AppType.ui(12, weight: .medium))
+                                                .foregroundStyle(sentenceStateColor(item))
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.8)
+                                        }
+                                        Text("\(formatTime(item.startSeconds)) – \(formatTime(item.endSeconds))")
+                                            .font(AppType.ui(12).monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
                                     Spacer(minLength: 0)
-                                    Label(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID),
-                                          systemImage: sentenceStateSymbol(item))
-                                        .font(AppType.caption)
-                                        .foregroundStyle(sentenceStateColor(item))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.8)
                                 }
-                                Text(item.transcript)
-                                    .font(AppType.ui(12))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                Text("\(formatTime(item.startSeconds)) – \(formatTime(item.endSeconds))")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
+                                .padding(.vertical, 9)
+                                .padding(.horizontal, 10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(rowBackgroundColor(for: item))
+                                }
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .strokeBorder(rowBorderColor(for: item), lineWidth: 1)
+                                        .allowsHitTesting(false)
+                                }
                             }
-                            Spacer(minLength: 0)
+                            .buttonStyle(.plain)
+                            .onHover { isHovering in
+                                if isHovering {
+                                    hoveredSentenceID = item.id
+                                } else if hoveredSentenceID == item.id {
+                                    hoveredSentenceID = nil
+                                }
+                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(
+                                "句子 \(item.ordinal)，\(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID))"
+                            )
+                            .accessibilityValue(
+                                "\(formatTime(item.startSeconds)) 到 \(formatTime(item.endSeconds))"
+                            )
                         }
-                        .padding(.vertical, 3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(
-                            "句子 \(item.ordinal)，\(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID))，\(item.transcript)"
-                        )
-                        .accessibilityValue(
-                            "\(formatTime(item.startSeconds)) 到 \(formatTime(item.endSeconds))"
-                        )
-                        .tag(item.id)
                     }
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
             }
         }
-        .background(AppPalette.sidebar.opacity(0.5))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func studyCanvas(_ material: AudioMaterial) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .center, spacing: 10) {
                     materialSummary(material)
-                    Spacer(minLength: 10)
-                    materialActions(material)
+                    Spacer(minLength: 4)
+                    HStack(spacing: 6) {
+                        materialActions(material)
+                        if isReviewingTranscript {
+                            Button("返回练习", systemImage: "arrow.uturn.backward") {
+                                exitTranscriptReview()
+                            }
+                            .buttonStyle(AppActionButtonStyle())
+                            Button("完成核对", systemImage: "checkmark.circle") {
+                                completeTranscriptReview(material)
+                            }
+                            .buttonStyle(AppActionButtonStyle(prominent: true))
+                            .disabled(material.transcriptionComplete != true ||
+                                      hasOtherTranscriptReviewDrafts(material))
+                            .help(reviewCompletionHelp(material))
+                        } else {
+                            Button("核对分句", systemImage: "text.badge.checkmark") {
+                                enterTranscriptReview()
+                            }
+                            .buttonStyle(AppActionButtonStyle())
+                            .disabled(material.sentences.isEmpty)
+                        }
+                        Menu("字幕") {
+                            Button("导入字幕文件…", systemImage: "captions.bubble") {
+                                importSubtitles(material)
+                            }
+                            .disabled(store.activeTranscriptions.contains(material.id))
+                            Button("粘贴字幕…", systemImage: "doc.on.clipboard") {
+                                showPasteSubtitles = true
+                            }
+                        }
+                        .buttonStyle(AppActionButtonStyle())
+                    }
                 }
 
                 if store.activeTranscriptions.contains(material.id) {
@@ -314,14 +354,14 @@ struct ListeningView: View {
                         Text(material.referenceSubtitleCues?.isEmpty == false
                              ? "正在校准字幕时间…"
                              : "正在本机转写…")
-                            .font(AppType.ui(12))
+                            .font(AppType.supporting)
                         Spacer()
                         Button("暂停") { store.pauseTranscription(materialID: material.id) }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(AppActionButtonStyle())
                     }
                 } else if let progress = store.transcriptionStatus[material.id] {
                     Text(progress)
-                        .font(AppType.ui(11))
+                        .font(AppType.supporting)
                         .foregroundStyle(.secondary)
                 }
 
@@ -332,19 +372,20 @@ struct ListeningView: View {
                                systemImage: playing && playbackSentenceID == nil ? "pause.fill" : "play.fill") {
                             togglePlayback(material: material, sentence: nil)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .buttonStyle(AppActionButtonStyle())
                         Text("整段音频")
-                            .font(AppType.ui(11, weight: .medium))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 15)
+            .padding(.horizontal, 2)
+            .padding(.top, 2)
+            .padding(.bottom, 8)
 
             Divider()
+                .padding(.bottom, 10)
 
             if isReviewingTranscript {
                 transcriptReviewWorkspace(material)
@@ -359,59 +400,93 @@ struct ListeningView: View {
             } else {
                 preparationState(material)
             }
+                learningCardSection(material)
+                    .padding(.top, 36)
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(.bottom, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func dictationWorkspace(_ material: AudioMaterial, _ sentence: ListeningSentence) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("句子 \(sentence.ordinal)")
-                    .font(AppType.pageTitle)
-                Text("of \(material.sentences.count)")
-                    .font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text("句子 \(sentence.ordinal)")
+                        .font(AppType.pageTitle)
+                    Text("of \(material.sentences.count)")
+                        .font(AppType.supporting.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Text("\(formatTime(sentence.startSeconds)) – \(formatTime(sentence.endSeconds))")
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(AppType.supporting.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 8) {
-                Button(playing && playbackSentenceID == sentence.id ? "暂停" :
-                       player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
-                       systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill") {
+                Button {
                     togglePlayback(material: material, sentence: sentence)
+                } label: {
+                    Label(playing && playbackSentenceID == sentence.id ? "暂停" :
+                          player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
+                          systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
+                .buttonStyle(AppActionButtonStyle(prominent: true))
+                .controlSize(.small)
+                .frame(height: 44)
                 .keyboardShortcut("r", modifiers: [.command])
                 Button("重听", systemImage: "arrow.clockwise") {
                     play(material: material, sentence: sentence)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                Button("后退 2 秒", systemImage: "gobackward.2") {
+                .buttonStyle(AppActionButtonStyle())
+                .controlSize(.small)
+                .frame(height: 44)
+                .help("重听本句")
+                Button {
                     seek(sentence: sentence, by: -2)
+                } label: {
+                    Label("2 秒", systemImage: "arrow.left")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(AppActionButtonStyle())
                 .controlSize(.small)
+                .frame(height: 44)
+                .help("后退 2 秒")
                 .disabled(player == nil || playbackSentenceID != sentence.id)
-                Button("前进 2 秒", systemImage: "goforward.2") {
+                Button {
                     seek(sentence: sentence, by: 2)
+                } label: {
+                    Label("2 秒", systemImage: "arrow.right")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(AppActionButtonStyle())
                 .controlSize(.small)
+                .frame(height: 44)
+                .help("前进 2 秒")
                 .disabled(player == nil || playbackSentenceID != sentence.id)
+                Button("下一句", systemImage: "chevron.right") {
+                    persistDraft()
+                    nextSentence(material, sentence)
+                }
+                .padding(.leading, 20)
+                .buttonStyle(AppActionButtonStyle())
+                .controlSize(.small)
+                .frame(height: 44)
+                .keyboardShortcut(.rightArrow, modifiers: [.command])
+                .disabled(sentence.ordinal >= material.sentences.count)
+                .fixedSize()
+                .layoutPriority(1)
             }
 
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 13) {
                 HStack {
                     Text(sentence.answerRevealed == true ? "你的听写" : "你听到了什么？")
-                        .font(AppType.ui(13, weight: .semibold))
+                        .font(AppType.sectionTitle)
                     Spacer()
                     Text("草稿自动保存")
-                        .font(AppType.ui(11))
+                        .font(AppType.supporting)
                         .foregroundStyle(.tertiary)
                 }
                 if sentence.answerRevealed == true {
@@ -419,11 +494,10 @@ struct ListeningView: View {
                         .font(AppType.studyText)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
-                        .padding(12)
-                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.vertical, 8)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("原句")
-                            .font(AppType.ui(11, weight: .semibold))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                         Text(sentence.transcript)
                             .font(AppType.reading(20))
@@ -431,23 +505,21 @@ struct ListeningView: View {
                             .textSelection(.enabled)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.green.opacity(0.2)))
+                    .padding(.top, 12)
                     Button("再听，再写同一句", systemImage: "arrow.counterclockwise") {
                         retry(material, sentence)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(AppActionButtonStyle())
                 } else {
                     TextEditor(text: $draft)
                         .font(AppType.studyText)
                         .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .frame(minHeight: 130, maxHeight: 260)
-                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(12)
+                        .frame(minHeight: 160, maxHeight: 300)
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(dictationIsFocused ? Color.accentColor : AppPalette.separator,
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .strokeBorder(dictationIsFocused ? GlassTheme.cyan : .white.opacity(0.18),
                                               lineWidth: dictationIsFocused ? 1.5 : 1)
                                 .allowsHitTesting(false)
                         }
@@ -456,67 +528,51 @@ struct ListeningView: View {
                         .accessibilityLabel("西班牙语听写")
                     HStack {
                         Text("\(draft.split(whereSeparator: { $0.isWhitespace }).count) 词")
-                            .font(AppType.ui(11))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("看答案", systemImage: "eye") {
                             reveal(material, sentence)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(AppActionButtonStyle(prominent: true))
                         .keyboardShortcut(.return, modifiers: [.command])
                     }
                 }
             }
             Spacer(minLength: 0)
-            HStack {
-                if sentence.answerRevealed != true {
-                    Label("音频 → 听写 → 原句", systemImage: "arrow.right")
-                        .font(AppType.ui(11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("下一句", systemImage: "chevron.right") {
-                    persistDraft()
-                    nextSentence(material, sentence)
-                }
-                .buttonStyle(.bordered)
-                .keyboardShortcut(.rightArrow, modifiers: [.command])
-                .disabled(sentence.ordinal >= material.sentences.count)
-            }
             if let status {
                 Label(status, systemImage: "info.circle")
-                    .font(AppType.ui(12))
+                    .font(AppType.supporting)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
         }
-        .padding(20)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func transcriptReviewWorkspace(_ material: AudioMaterial) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 5) {
                         Label("字幕复核", systemImage: "text.badge.checkmark")
                             .font(AppType.ui(18, weight: .semibold))
                         Text(material.title)
-                            .font(AppType.ui(12))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                         Text(transcriptReviewProgress(material))
-                            .font(AppType.ui(12, weight: .medium))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
                     if let sentence {
                         Text(sentenceStateLabel(sentence, isSelected: true))
-                            .font(AppType.ui(11, weight: .medium))
+                            .font(AppType.supporting)
                             .foregroundStyle(sentenceStateColor(sentence))
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
-                            .background(AppPalette.surface, in: Capsule())
+                            .background(.white.opacity(0.10), in: Capsule())
                     }
                 }
 
@@ -525,14 +581,14 @@ struct ListeningView: View {
                         Text("句子 \(sentence.ordinal)")
                             .font(AppType.pageTitle)
                         Text("of \(material.sentences.count)")
-                            .font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
+                            .font(AppType.supporting.monospacedDigit())
                             .foregroundStyle(.secondary)
                         Button {
                             navigateTranscriptReview(by: -1, in: material)
                         } label: {
                             Image(systemName: "chevron.left")
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(AppActionButtonStyle())
                         .help("上一句")
                         .accessibilityLabel("上一句")
                         .disabled(sentence.ordinal <= 1)
@@ -541,36 +597,38 @@ struct ListeningView: View {
                         } label: {
                             Image(systemName: "chevron.right")
                         }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(AppActionButtonStyle())
                         .help("下一句")
                         .accessibilityLabel("下一句")
                         .disabled(sentence.ordinal >= material.sentences.count)
                         Spacer(minLength: 8)
                         Text(sentenceStateLabel(sentence, isSelected: true))
-                            .font(AppType.ui(12, weight: .medium))
+                            .font(AppType.supporting)
                             .foregroundStyle(sentenceStateColor(sentence))
                     }
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         Button(playing && playbackSentenceID == sentence.id ? "暂停" :
                                player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
                                systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill") {
                             togglePlayback(material: material, sentence: sentence)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(AppActionButtonStyle(prominent: true))
                         Button("重听", systemImage: "arrow.clockwise") {
                             play(material: material, sentence: sentence)
                         }
-                        .buttonStyle(.bordered)
-                        Button("后退 2 秒", systemImage: "gobackward.2") {
+                        .buttonStyle(AppActionButtonStyle())
+                    }
+                    HStack(spacing: 10) {
+                        Button("后退 2 秒", systemImage: "gobackward") {
                             seek(sentence: sentence, by: -2)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(AppActionButtonStyle())
                         .disabled(player == nil || playbackSentenceID != sentence.id)
-                        Button("前进 2 秒", systemImage: "goforward.2") {
+                        Button("前进 2 秒", systemImage: "goforward") {
                             seek(sentence: sentence, by: 2)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(AppActionButtonStyle())
                         .disabled(player == nil || playbackSentenceID != sentence.id)
                         Spacer(minLength: 0)
                     }
@@ -582,19 +640,19 @@ struct ListeningView: View {
                             Spacer()
                             if hasCurrentTranscriptReviewDraft {
                                 Label("未保存", systemImage: "pencil.circle.fill")
-                                    .font(AppType.ui(11, weight: .medium))
+                                    .font(AppType.supporting)
                                     .foregroundStyle(.orange)
                             }
                         }
                         TextEditor(text: $reviewText)
-                            .font(AppType.ui(16))
+                            .font(AppType.ui(17))
                             .scrollContentBackground(.hidden)
-                            .padding(8)
-                            .frame(minHeight: 150, maxHeight: 230)
-                            .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                            .padding(12)
+                            .frame(minHeight: 170, maxHeight: 260)
+                            .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
                             .overlay {
-                                RoundedRectangle(cornerRadius: 8)
-                                    .strokeBorder(AppPalette.separator, lineWidth: 1)
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
                                     .allowsHitTesting(false)
                             }
                             .accessibilityLabel("字幕文本")
@@ -602,21 +660,21 @@ struct ListeningView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("起止时间（秒）")
-                            .font(AppType.ui(12, weight: .semibold))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                         HStack(alignment: .top, spacing: 12) {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("开始").font(AppType.ui(11)).foregroundStyle(.secondary)
+                                Text("开始").font(AppType.supporting).foregroundStyle(.secondary)
                                 TextField("开始（秒）", text: $reviewStart)
                                     .studyInputChrome()
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(AppType.body.monospacedDigit())
                                     .accessibilityLabel("开始时间，秒")
                             }
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("结束").font(AppType.ui(11)).foregroundStyle(.secondary)
+                                Text("结束").font(AppType.supporting).foregroundStyle(.secondary)
                                 TextField("结束（秒）", text: $reviewEnd)
                                     .studyInputChrome()
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(AppType.body.monospacedDigit())
                                     .accessibilityLabel("结束时间，秒")
                             }
                         }
@@ -627,12 +685,12 @@ struct ListeningView: View {
                             Button("本机语音复核", systemImage: "waveform") {
                                 recognizeReviewSentence(sentence, material: material)
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(AppActionButtonStyle())
                             .disabled(isReviewSpeechWorking || isReviewAIWorking)
                             Button("语音 + AI 校对", systemImage: "sparkles") {
                                 proofreadReviewSentence(sentence, material: material, includeSpeech: true)
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(AppActionButtonStyle())
                             .disabled(isReviewAIWorking || isReviewSpeechWorking ||
                                       reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             if isReviewAIWorking || isReviewSpeechWorking {
@@ -640,11 +698,11 @@ struct ListeningView: View {
                             }
                         }
                         Text("结合音频确认建议；AI 不会自动覆盖字幕。")
-                            .font(AppType.ui(11))
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
                         if let reviewSpeechReference {
                             LabeledContent("本机识别参考", value: reviewSpeechReference)
-                                .font(AppType.ui(12))
+                                .font(AppType.supporting)
                                 .textSelection(.enabled)
                         }
                         if let reviewAISuggestion {
@@ -652,10 +710,10 @@ struct ListeningView: View {
                                 Text("AI 建议")
                                     .font(AppType.ui(14, weight: .semibold))
                                 Text(reviewAISuggestion.suggestedText)
-                                    .font(AppType.ui(14))
+                                    .font(AppType.ui(15))
                                     .textSelection(.enabled)
                                 Text(reviewAISuggestion.explanation)
-                                    .font(AppType.ui(12))
+                                    .font(AppType.supporting)
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                                 Button("采用建议到编辑框") {
@@ -663,11 +721,15 @@ struct ListeningView: View {
                                     self.reviewAISuggestion = nil
                                     reviewStatus = "建议已填入编辑框，请对照音频确认后保存。"
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(AppActionButtonStyle())
                             }
-                            .padding(12)
+                            .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+                            }
                         }
                     }
 
@@ -675,12 +737,12 @@ struct ListeningView: View {
                         Button("保存此句修改", systemImage: "square.and.arrow.down") {
                             saveTranscriptReview(sentence, material: material)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(AppActionButtonStyle(prominent: true))
                         .disabled(!hasCurrentTranscriptReviewDraft)
                         Button("放弃草稿", systemImage: "trash", role: .destructive) {
                             confirmingReviewDiscard = true
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(AppActionButtonStyle())
                         .disabled(!hasCurrentTranscriptReviewDraft)
                         Spacer(minLength: 0)
                         Menu("切句操作") {
@@ -719,9 +781,8 @@ struct ListeningView: View {
                         .frame(maxWidth: .infinity, minHeight: 200)
                 }
             }
-            .padding(20)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
         .confirmationDialog("放弃当前句尚未保存的校对？", isPresented: $confirmingReviewDiscard,
                             titleVisibility: .visible) {
             Button("放弃草稿", role: .destructive) {
@@ -753,97 +814,109 @@ struct ListeningView: View {
                     Button("核对字幕与分句", systemImage: "text.badge.checkmark") {
                         enterTranscriptReview()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(AppActionButtonStyle(prominent: true))
                     Spacer()
                 }
             }
             if let status {
-                Text(status).font(AppType.ui(12)).foregroundStyle(.secondary).textSelection(.enabled)
+                Text(status).font(AppType.supporting).foregroundStyle(.secondary).textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(20)
+        .padding(24)
     }
 
-    private func learningInspector(_ material: AudioMaterial) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("学习检查器")
-                    .font(AppType.ui(13, weight: .semibold))
-                    .padding(.top, 16)
-
-                if let sentence, sentence.answerRevealed == true {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Label("理解这句", systemImage: "lightbulb")
-                                .font(AppType.ui(13, weight: .semibold))
-                            Spacer()
-                            if isAnalyzingListening { ProgressView().controlSize(.small) }
-                        }
-                        if let analysis = sentence.analysis {
-                            ListeningAnalysisView(analysis: analysis)
-                            Button("重新分析", systemImage: "arrow.clockwise") {
-                                analyzeListening(material, sentence)
-                            }
-                            .buttonStyle(.link)
-                            .disabled(isAnalyzingListening)
-                        } else {
-                            Text("AI 会结合你的听写和原句说明听辨难点、表达与语法。")
-                                .font(AppType.ui(12))
-                                .foregroundStyle(.secondary)
-                            Button("AI 听力分析", systemImage: "sparkles") {
-                                analyzeListening(material, sentence)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isAnalyzingListening)
-                        }
-                    }
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("创建卡片")
-                                .font(AppType.ui(13, weight: .semibold))
-                            Spacer()
-                            if isGeneratingCards || isAuditingCards {
-                                ProgressView().controlSize(.small)
-                            }
-                        }
-                        if let count = sentence.learningPoints?.count, count > 0 {
-                            Label("\(count) 张卡片草稿已保存", systemImage: "checkmark.circle")
-                                .font(AppType.ui(11))
-                                .foregroundStyle(.secondary)
-                        }
-                        Label("积累要点草稿自动保存在本机。", systemImage: "externaldrive")
-                            .font(AppType.ui(11))
+    @ViewBuilder
+    private func learningCardSection(_ material: AudioMaterial) -> some View {
+        if let sentence, sentence.answerRevealed == true {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("创建卡片")
+                            .font(AppType.sectionTitle)
+                        Text("积累要点会自动保存在本机。")
+                            .font(AppType.supporting)
                             .foregroundStyle(.secondary)
-                        LearningPointsEditor(points: Binding(
-                            get: { learningPoints },
-                            set: { points in
-                                learningPoints = points
-                                persistLearningPointsDraft(points)
-                            }
-                        ))
-                        Button("生成卡片草稿", systemImage: "rectangle.stack.badge.plus") {
-                            generateListeningCards(material, sentence)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isGeneratingCards || isAuditingCards)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                } else {
-                    Label("先听写并查看原句", systemImage: "text.quote")
-                        .font(AppType.ui(13, weight: .medium))
-                    Text("完成一次听写后，可在这里查看解释并从当前句子创建卡片。")
-                        .font(AppType.ui(12))
+                    Spacer(minLength: 8)
+                    if isGeneratingCards || isAuditingCards {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+
+                if let count = sentence.learningPoints?.count, count > 0 {
+                    Label("\(count) 张卡片草稿已保存", systemImage: "checkmark.circle")
+                        .font(AppType.supporting)
                         .foregroundStyle(.secondary)
                 }
+
+                LearningPointsEditor(points: Binding(
+                    get: { learningPoints },
+                    set: { points in
+                        learningPoints = points
+                        persistLearningPointsDraft(points)
+                    }
+                ))
+
+                let filledCount = learningPoints.filter {
+                    !$0.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }.count
+                HStack(spacing: 12) {
+                    Button {
+                        learningPoints.append(
+                            LearningPointRequest(id: UUID(), category: .expression, prompt: "")
+                        )
+                        persistLearningPointsDraft(learningPoints)
+                    } label: {
+                        Label("新增要点", systemImage: "plus")
+                            .font(AppType.ui(14, weight: .medium))
+                            .padding(.horizontal, 14)
+                            .frame(height: 42)
+                            .background(
+                                .white.opacity(0.11),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        generateListeningCards(material, sentence)
+                    } label: {
+                        Label(
+                            filledCount > 0 ? "生成 \(filledCount) 张卡片草稿" : "生成卡片草稿",
+                            systemImage: "rectangle.stack.badge.plus"
+                        )
+                        .font(AppType.ui(14, weight: .semibold))
+                        .lineLimit(1)
+                        .frame(width: 210, height: 42)
+                        .background {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [GlassTheme.magenta.opacity(0.86), GlassTheme.violet.opacity(0.86)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(.white.opacity(0.28), lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(filledCount == 0 || isGeneratingCards || isAuditingCards)
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 18)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 8)
         }
-        .background(AppPalette.sidebar)
     }
 
     private func canDictate(_ material: AudioMaterial) -> Bool {
@@ -864,10 +937,32 @@ struct ListeningView: View {
         if isReviewingTranscript && hasTranscriptReviewDraft(sentence, materialID: material?.id) {
             return .orange
         }
-        if sentence.answerRevealed == true { return .green }
+        if sentence.answerRevealed == true { return Color(red: 0.62, green: 0.78, blue: 0.69) }
         if sentence.status == .generated { return .orange }
-        if sentence.status == .verified || sentence.status == .corrected { return .green }
-        return Color.accentColor
+        if sentence.status == .verified || sentence.status == .corrected {
+            return Color(red: 0.62, green: 0.78, blue: 0.69)
+        }
+        return Color(red: 0.58, green: 0.72, blue: 0.75)
+    }
+
+    private func rowBackgroundColor(for sentence: ListeningSentence) -> Color {
+        if sentence.id == selectedSentenceID {
+            return GlassTheme.cyan.opacity(0.11)
+        }
+        if sentence.id == hoveredSentenceID {
+            return Color.white.opacity(0.055)
+        }
+        return .clear
+    }
+
+    private func rowBorderColor(for sentence: ListeningSentence) -> Color {
+        if sentence.id == selectedSentenceID {
+            return GlassTheme.cyan.opacity(0.25)
+        }
+        if sentence.id == hoveredSentenceID {
+            return Color.white.opacity(0.12)
+        }
+        return .clear
     }
 
     private func sentenceStateLabel(_ sentence: ListeningSentence, isSelected: Bool = false) -> String {
@@ -1045,12 +1140,13 @@ struct ListeningView: View {
                     material.transcribedThroughSeconds != nil ? "转写可继续" : "尚未转写"
             }
         }
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 3) {
             Text(material.title)
-                .font(AppType.ui(17, weight: .semibold))
-                .lineLimit(2)
+                .font(AppType.ui(15, weight: .semibold))
+                .lineLimit(1)
             Text("\(material.sentences.count) 句 · \(state)")
-                .font(AppType.ui(12)).foregroundStyle(.secondary)
+                .font(AppType.ui(12))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -1528,7 +1624,9 @@ private struct ListeningAnalysisView: View {
         VStack(alignment: .leading, spacing: 12) {
             ListeningAnalysisSummaryCard(explanation: analysis.explanation)
             if !(analysis.items ?? []).isEmpty {
-                Divider()
+                Rectangle()
+                    .fill(.white.opacity(0.14))
+                    .frame(height: 1)
                 ForEach(analysis.items ?? []) { item in
                     ListeningAnalysisItemCard(item: item)
                 }
@@ -1544,15 +1642,20 @@ private struct ListeningAnalysisSummaryCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("听力诊断", systemImage: "ear")
-                .font(AppType.ui(13, weight: .semibold))
+                .font(AppType.sectionTitle)
                 .foregroundStyle(GlassTheme.cyan)
             Text(explanation)
-                .font(AppType.ui(14))
-                .lineSpacing(4)
+                .font(AppType.body)
+                .lineSpacing(5)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
+        .padding(16)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.white.opacity(0.15), lineWidth: 1)
+        }
     }
 }
 
@@ -1564,9 +1667,9 @@ private struct ListeningAnalysisItemCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(categoryTitle)
-                .font(AppType.ui(12, weight: .semibold))
+                .font(AppType.supporting)
                 .foregroundStyle(isAttemptDifference ? .orange : GlassTheme.cyan)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
@@ -1576,12 +1679,12 @@ private struct ListeningAnalysisItemCard: View {
                 )
 
             Text(item.title)
-                .font(AppType.ui(16, weight: .semibold))
+                .font(AppType.sectionTitle)
                 .lineSpacing(2)
                 .textSelection(.enabled)
 
             Text(item.detail)
-                .font(AppType.ui(15))
+                .font(AppType.body)
                 .lineSpacing(5)
                 .textSelection(.enabled)
 
@@ -1590,21 +1693,26 @@ private struct ListeningAnalysisItemCard: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 4) {
                     Text("依据")
-                        .font(AppType.ui(11, weight: .semibold))
+                        .font(AppType.supporting)
                         .foregroundStyle(.secondary)
                     Text(evidence)
-                        .font(AppType.ui(12))
+                        .font(AppType.supporting)
                         .lineSpacing(3)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
-                .padding(10)
+                .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 7)
+        .padding(16)
+        .background(.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+        }
     }
 
     private var categoryTitle: String {
@@ -1622,44 +1730,80 @@ private struct ListeningAnalysisItemCard: View {
 
 private struct LearningPointsEditor: View {
     @Binding var points: [LearningPointRequest]
+    @State private var hoveredRemovalID: UUID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("积累要点")
-                .font(AppType.ui(12, weight: .semibold))
-            Text("每条已填写的要点各生成一张卡片草稿。")
-                .font(AppType.ui(11))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 15) {
             ForEach($points) { $point in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Picker("分类", selection: $point.category) {
-                            ForEach(CardCategory.allCases) { category in
-                                Text(category.rawValue).tag(category)
+                HStack(spacing: 14) {
+                    Menu {
+                        ForEach(CardCategory.allCases) { category in
+                            Button {
+                                point.category = category
+                            } label: {
+                                if point.category == category {
+                                    Label(category.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(category.rawValue)
+                                }
                             }
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .controlSize(.small)
-                        Spacer()
-                        Button(role: .destructive) {
-                            points.removeAll { $0.id == point.id }
-                        } label: {
-                            Image(systemName: "minus.circle")
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text(point.category.rawValue)
+                            Image(systemName: "chevron.down")
+                                .font(AppType.ui(10, weight: .semibold))
                         }
-                        .buttonStyle(.borderless)
-                        .help("移除此要点")
+                        .font(AppType.ui(14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.94))
+                        .frame(width: 96, height: 44)
+                        .background(
+                            LinearGradient(
+                                colors: [.white.opacity(0.12), .white.opacity(0.07)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                                .allowsHitTesting(false)
+                        }
                     }
-                    TextField(placeholder(for: point.category), text: $point.prompt, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(2...4)
+                    .buttonStyle(.plain)
+
+                    TextField(
+                        "",
+                        text: $point.prompt,
+                        prompt: Text(placeholder(for: point.category))
+                            .foregroundColor(.white.opacity(0.72)),
+                        axis: .vertical
+                    )
+                        .font(AppType.body)
+                        .lineLimit(1...3)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .studyInputChrome()
+
+                    Button {
+                        points.removeAll { $0.id == point.id }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(AppType.ui(11, weight: .semibold))
+                            .frame(width: 24, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(hoveredRemovalID == point.id ? Color.red : Color.secondary)
+                    .onHover { isHovering in
+                        hoveredRemovalID = isHovering ? point.id : nil
+                    }
+                    .help("移除此要点")
+                    .accessibilityLabel("移除此要点")
                 }
-                .padding(.vertical, 4)
             }
-            Button("新增要点", systemImage: "plus") {
-                points.append(LearningPointRequest(id: UUID(), category: .expression, prompt: ""))
-            }
-            .buttonStyle(.borderless)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1710,6 +1854,7 @@ private struct SentenceSplitSheet: View {
         }
         .padding(26)
         .frame(width: 540)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .interactiveDismissDisabled(true)
         .onAppear {
             first = sentence.transcript
@@ -1729,12 +1874,15 @@ private struct PasteSubtitleSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("粘贴字幕 (SRT/VTT)").font(AppType.ui(22, weight: .semibold))
             TextEditor(text: $text)
-                .font(AppType.ui(15))
+                .font(AppType.body)
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 220)
-                .padding(10)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator.opacity(0.7)))
+                .padding(12)
+                .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                }
             if let errorMessage { Text(errorMessage).font(AppType.ui(12)).foregroundStyle(.red) }
             HStack {
                 Spacer()
@@ -1746,6 +1894,7 @@ private struct PasteSubtitleSheet: View {
         }
         .padding(24)
         .frame(width: 560)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .interactiveDismissDisabled(!text.isEmpty)
     }
 

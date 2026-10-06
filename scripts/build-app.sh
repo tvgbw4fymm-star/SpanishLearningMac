@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="${0:A:h:h}"
+source "$PROJECT_ROOT/scripts/app-version.sh"
 # Use a stable local code-signing identity so the app's designated requirement
 # (and therefore its Keychain ACL) stays the same across rebuilds. Ad-hoc
 # signing ("codesign --sign -") derives the requirement from the binary's
@@ -26,7 +27,7 @@ cp "$SOURCE_BIN_PATH" "$BIN_PATH"
 test -d "$RESOURCE_BUNDLE"
 cp -R "$RESOURCE_BUNDLE" "$APP_PATH/Contents/Resources/"
 
-cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
+cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -37,8 +38,8 @@ cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>西语学习</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.6.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+  <key>CFBundleVersion</key><string>${APP_BUILD}</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSpeechRecognitionUsageDescription</key><string>用于在这台 Mac 上将导入的西语音频转成听写练习文字。</string>

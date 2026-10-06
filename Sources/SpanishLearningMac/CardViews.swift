@@ -136,7 +136,7 @@ private struct CardLibraryRow: View {
     @EnvironmentObject private var store: StudyStore
     let card: StudyCard
     var body: some View {
-        GlassCard {
+        GlassCard(accent: GlassTheme.violet) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     CardTagView(kind: .category(card.category), showsIcon: false)
@@ -236,7 +236,7 @@ private struct CardDetailSheet: View {
         .frame(width: 720)
         .frame(maxHeight: 760)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(AppPalette.separator))
+        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.22)))
         .shadow(color: .black.opacity(0.3), radius: 26, y: 12)
         .confirmationDialog("确定将这张卡片移到回收站吗？之后可以恢复。",
                            isPresented: $confirmingTrash, titleVisibility: .visible) {
@@ -305,9 +305,6 @@ private struct CardDetailSheet: View {
             TextEditor(text: $editQuestion).frame(minHeight: 80).studyInputChrome()
             Text("背面").font(AppType.ui(15, weight: .semibold))
             TextEditor(text: $editAnswer).frame(minHeight: 150).studyInputChrome()
-            Label("编辑草稿会自动保留在本机；保存后才会修改卡片。", systemImage: "externaldrive")
-                .font(AppType.ui(12))
-                .foregroundStyle(.secondary)
             HStack {
                 Button("放弃修改") {
                     if hasUnsavedCardChanges(card) {
@@ -415,7 +412,7 @@ private struct CardDetailSheet: View {
         VStack(alignment: .leading, spacing: Layout.medium) {
             Text("正面")
                 .font(AppType.ui(12, weight: .semibold))
-                .foregroundStyle(AppPalette.secondaryInk)
+                .foregroundStyle(.white.opacity(0.72))
             if let title = card.title, !title.isEmpty {
                 Text(title)
                     .font(AppType.ui(17, weight: .semibold))
@@ -429,7 +426,7 @@ private struct CardDetailSheet: View {
                 Divider()
                 Text("背面")
                     .font(AppType.ui(12, weight: .semibold))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.72))
                 Text(card.answer).font(AppType.ui(17)).lineSpacing(5).textSelection(.enabled)
             } else {
                 Button("显示答案") { answerVisible = true }
@@ -441,11 +438,19 @@ private struct CardDetailSheet: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(22)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(AppPalette.separator, lineWidth: 1)
+        .background(
+            LinearGradient(colors: [
+                Color.white.opacity(0.08),
+                Color.white.opacity(0.05)
+            ], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(.white.opacity(0.20), lineWidth: 1)
+                .blendMode(.overlay)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 16, y: 8)
     }
 
     private func sources(_ card: StudyCard) -> some View {
@@ -575,8 +580,8 @@ private struct CardDetailSheet: View {
             }
         }
         .padding(16)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(AppPalette.separator))
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.white.opacity(0.12)))
     }
 
     private func nextIntervalText(_ due: Date?) -> String {

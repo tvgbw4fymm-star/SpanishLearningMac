@@ -28,6 +28,8 @@ private struct OverviewStats {
         }
     }
     var todayWriting: Int { database.writingExercises.flatMap(\.versions).filter { isToday($0.submittedAt) }.count }
+    var todayReviews: Int { Set(database.reviewEvents.filter { isToday($0.reviewedAt) }.map(\.cardID)).count }
+
     var streak: Int {
         var activeDays = Set(database.dictationAttempts.map { calendar.startOfDay(for: $0.submittedAt) })
         activeDays.formUnion(database.readingRecords.map { calendar.startOfDay(for: $0.completedAt) })
@@ -85,32 +87,32 @@ struct OverviewView: View {
         return HStack(spacing: 18) {
             Image(systemName: "sparkle")
                 .font(AppType.ui(19, weight: .medium))
-                .foregroundStyle(AppPalette.ink.opacity(0.9))
+                .foregroundStyle(.white.opacity(0.9))
             Text("西语喵")
                 .font(AppType.ui(16, weight: .semibold))
-                .foregroundStyle(AppPalette.ink)
+                .foregroundStyle(.white)
                 .fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 20)
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(AppType.ui(17, weight: .medium))
-                    .foregroundStyle(AppPalette.secondaryInk)
-                TextField("搜索卡片问题或答案…", text: $cardSearchQuery)
+                    .foregroundStyle(.white.opacity(0.82))
+                TextField("搜索卡片或内容…", text: $cardSearchQuery)
                     .textFieldStyle(.plain)
                     .focused($searchFocused)
                     .onSubmit { selectedScreen = .cards }
                     .font(AppType.ui(15, weight: .regular))
                 Text("⌘ K")
                     .font(AppType.ui(12, weight: .medium))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.7))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
-                    .background(AppPalette.sidebar, in: RoundedRectangle(cornerRadius: 6))
+                    .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
             }
             .padding(.horizontal, 16)
             .frame(width: searchWidth, height: 44)
-            .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(AppPalette.separator))
+            .background(.white.opacity(0.09), in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.22), lineWidth: 1))
             .background {
                 Button("聚焦搜索") { searchFocused = true }
                     .keyboardShortcut("k", modifiers: .command)
@@ -127,11 +129,11 @@ struct OverviewView: View {
                 Text("HOLA, BIENVENIDO")
                     .font(AppType.latin(13, weight: .medium))
                     .tracking(2.8)
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.75))
                 Text("每天的学习，慢慢留下来。")
                     .font(AppType.ui(36, weight: .semibold))
                     .tracking(1)
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(.white)
                     .minimumScaleFactor(0.7)
                     .lineLimit(1)
             }
@@ -139,10 +141,10 @@ struct OverviewView: View {
             VStack(alignment: .trailing, spacing: 10) {
                 Text(Date.now.formatted(.dateTime.month(.wide).day().weekday(.wide).locale(Locale(identifier: "zh_CN"))))
                     .font(AppType.ui(17, weight: .semibold))
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(.white)
                 Text("保持学习，遇见更好的自己。")
                     .font(AppType.ui(13))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.68))
             }
             .padding(.bottom, 5)
         }
@@ -195,17 +197,17 @@ struct OverviewView: View {
     }
     private var cardsCard: some View {
         OverviewMetricCard(title: "单词卡片", value: stats.confirmedCards.formatted(),
-                           note: "待复习 \(stats.dueCards) 张", illustration: "cards",
+                           note: "今日复习 \(stats.todayReviews) 个", illustration: "cards",
                            colors: [.init(red: 0.34, green: 0.18, blue: 0.65), .init(red: 0.56, green: 0.31, blue: 0.87), .init(red: 0.77, green: 0.51, blue: 1.00)]) {
-            cardSearchQuery = ""
             selectedScreen = .cards
-            showDueCards = true
         }
     }
     private var progressCard: some View {
         OverviewMetricCard(title: "学习进度", value: stats.streak == 0 ? "从今天开始" : "连续 \(stats.streak) 天",
                            note: stats.streak == 0 ? "每一天都可以是新的开始" : "继续加油，别打断！", illustration: "progress",
-                           colors: [.init(red: 0.08, green: 0.37, blue: 0.39), .init(red: 0.12, green: 0.57, blue: 0.50), .init(red: 0.33, green: 0.80, blue: 0.60)])
+                           colors: [.init(red: 0.08, green: 0.37, blue: 0.39), .init(red: 0.12, green: 0.57, blue: 0.50), .init(red: 0.33, green: 0.80, blue: 0.60)]) {
+            selectedScreen = .cards
+        }
     }
 
     private var activitySection: some View {
@@ -216,7 +218,7 @@ struct OverviewView: View {
                         .font(AppType.ui(20, weight: .semibold))
                     Text("最近 90 天 · 听、读、写合计")
                         .font(AppType.ui(15, weight: .regular))
-                        .foregroundStyle(AppPalette.secondaryInk)
+                        .foregroundStyle(.white.opacity(0.65))
                 }
                 Spacer()
                 HStack(spacing: 7) {
@@ -229,23 +231,23 @@ struct OverviewView: View {
                     Text("多")
                 }
                 .font(AppType.ui(12, weight: .regular))
-                .foregroundStyle(AppPalette.secondaryInk)
+                .foregroundStyle(.white.opacity(0.74))
             }
             ActivityHeatmap(database: store.data)
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator, lineWidth: 1))
+        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 36))
+        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.18), lineWidth: 1))
     }
 }
 
 private struct OverviewToolbarButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(AppPalette.ink)
-            .background(AppPalette.surface, in: Circle())
-            .overlay(Circle().strokeBorder(AppPalette.separator, lineWidth: 1))
+            .foregroundStyle(.white)
+            .background(.white.opacity(configuration.isPressed ? 0.20 : 0.10), in: Circle())
+            .overlay(Circle().strokeBorder(.white.opacity(0.21), lineWidth: 1))
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
     }
 }
@@ -262,7 +264,7 @@ private struct StickerArtwork: View {
             } else {
                 Image(systemName: "photo")
                     .resizable()
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.75))
             }
         }
         .accessibilityHidden(true)
@@ -276,61 +278,47 @@ private struct OverviewMetricCard: View {
     let note: String
     let illustration: String
     let colors: [Color]
-    var action: (() -> Void)? = nil
+    let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        Group {
-            if let action {
-                Button(action: action) { cardContent }
-                    .buttonStyle(.plain)
-                    .onHover { hovering = $0 }
-                    .accessibilityLabel("\(title)，\(value)，\(note)")
-            } else {
-                cardContent
-                    .accessibilityElement(children: .combine)
-            }
-        }
-        .animation(GlassTheme.animation, value: hovering)
-    }
-
-    private var cardContent: some View {
-        GeometryReader { geometry in
+        Button(action: action) {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 36, style: .continuous)
                     .fill(LinearGradient(colors: colors.map { $0.opacity(reduceTransparency ? 1 : 0.96) },
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay {
                         RoundedRectangle(cornerRadius: 36, style: .continuous)
-                            .fill(RadialGradient(colors: [Color.white.opacity(reduceTransparency ? 0 : 0.20), .clear],
+                            .fill(RadialGradient(colors: [.white.opacity(reduceTransparency ? 0 : 0.20), .clear],
                                                  center: .topTrailing, startRadius: 8, endRadius: 250))
                     }
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(title)
-                        .font(AppType.ui(21, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+                    HStack {
+                        Text(title)
+                            .font(AppType.ui(21, weight: .semibold))
+                        Spacer()
+                    }
                     Spacer()
                     Text(value)
                         .font(AppType.ui(value.count > 6 ? 32 : 43, weight: .semibold))
-                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
-                    Text(note)
-                        .font(AppType.ui(15, weight: .medium))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 6)
+                    HStack(alignment: .bottom) {
+                        Text(note)
+                            .font(AppType.ui(17, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .foregroundStyle(.white.opacity(0.86))
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                            .font(AppType.ui(16, weight: .semibold))
+                            .frame(width: 36, height: 36)
+                            .background(.white.opacity(0.16), in: Circle())
+                            .overlay(Circle().strokeBorder(.white.opacity(0.30), lineWidth: 1))
+                    }
+                    .padding(.top, 6)
                 }
-                .padding(16)
-                .frame(width: max(geometry.size.width * 0.68, 120),
-                       height: max(geometry.size.height - 20, 0),
-                       alignment: .leading)
-                .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                .padding(10)
-
+                .padding(22)
                 StickerArtwork(name: illustration)
                     .scaledToFit()
                     .frame(width: 105, height: 105)
@@ -342,14 +330,17 @@ private struct OverviewMetricCard: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+            .frame(maxWidth: .infinity)
+            .frame(height: 218)
             .overlay(RoundedRectangle(cornerRadius: 36, style: .continuous)
-                .strokeBorder(Color.white.opacity(hovering ? 0.43 : 0.27), lineWidth: 1.2))
+                .strokeBorder(.white.opacity(hovering ? 0.43 : 0.27), lineWidth: 1.2))
             .shadow(color: colors[0].opacity(hovering ? 0.34 : 0.20), radius: hovering ? 22 : 14, y: 10)
             .offset(y: hovering ? -2 : 0)
             .contentShape(RoundedRectangle(cornerRadius: 36))
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 218)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(GlassTheme.animation, value: hovering)
+        .accessibilityLabel("\(title)，\(value)，\(note)")
     }
 }

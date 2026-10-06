@@ -14,20 +14,18 @@ struct SpanishLearningMacApp: App {
             RootView()
                 .environmentObject(store)
                 .environmentObject(editingDrafts)
-                .frame(minWidth: 900, minHeight: 620)
-                .task { _ = try? await store.createAutomaticBackup() }
+                .frame(minWidth: 1260, minHeight: 760)
+                .task {
+                    MiauFont.ensureFontsLoaded()
+                    _ = try? await store.createAutomaticBackup()
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .inactive || phase == .background {
                         Task { _ = try? await store.createAutomaticBackup() }
                     }
                 }
         }
-
-        Settings {
-            SettingsView()
-                .environmentObject(store)
-                .frame(width: 760, height: 680)
-        }
+        .windowStyle(.hiddenTitleBar)
     }
 }
 
@@ -40,8 +38,19 @@ enum StudyScreen: String, CaseIterable, Identifiable {
     case writing = "写"
     case writingHistory = "写作历史"
     case cards = "卡片"
+    case settings = "设置"
 
     var id: String { rawValue }
+
+    /// 是否为「记录」类页面。记录类在侧边栏弱化显示,不参与模块色彩体系。
+    var isHistory: Bool {
+        switch self {
+        case .dictationHistory, .readingHistory, .writingHistory: true
+        default: false
+        }
+    }
+
+    /// 全应用只有一个主色;模块之间靠图标区分,不再各给一个颜色。
     var accent: Color {
         switch self {
         case .overview: GlassTheme.magenta
@@ -52,6 +61,7 @@ enum StudyScreen: String, CaseIterable, Identifiable {
         case .writing: Color(red: 1.00, green: 0.72, blue: 0.40)
         case .writingHistory: Color(red: 0.40, green: 0.85, blue: 0.77)
         case .cards: GlassTheme.violet
+        case .settings: Color(red: 0.61, green: 0.70, blue: 1.00)
         }
     }
     var symbol: String {
@@ -64,6 +74,7 @@ enum StudyScreen: String, CaseIterable, Identifiable {
         case .writing: "square.and.pencil"
         case .writingHistory: "doc.text"
         case .cards: "rectangle.on.rectangle"
+        case .settings: "gearshape"
         }
     }
 }
@@ -77,37 +88,57 @@ struct RootView: View {
     @State private var selectedWritingExerciseID: UUID?
     @State private var cardSearchQuery = ""
     @State private var showDueCards = false
+    @State private var sidebarCollapsed = false
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedScreen) {
-                Section("学习") {
-                    navigationRow(.overview)
-                    navigationRow(.listening)
-                    navigationRow(.reading)
-                    navigationRow(.writing)
-                    navigationRow(.cards)
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                ScrollView {
+                    if #available(macOS 26.0, *) {
+                        GlassEffectContainer(spacing: 0) {
+                            sidebarRows
+                        }
+                    } else {
+                        sidebarRows
+                    }
                 }
-                Section("记录") {
-                    navigationRow(.dictationHistory)
-                    navigationRow(.readingHistory)
-                    navigationRow(.writingHistory)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .listStyle(.sidebar)
-            .navigationTitle("Spanish Learning Mac")
-            .navigationSplitViewColumnWidth(min: 175, ideal: 210, max: 260)
-        } detail: {
+            .frame(width: sidebarCollapsed ? 72 : 230)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.white.opacity(0.06))
+                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.14)))
+                    .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+            }
+            .padding(.leading, 16)
+            .padding(.vertical, 16)
+            .animation(GlassTheme.animation, value: sidebarCollapsed)
+
             detailContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(AppPalette.canvas)
-                .navigationTitle((selectedScreen ?? .overview).rawValue)
+                .background(Color.clear)
+                .padding(.leading, 12)
         }
-        .navigationSplitViewStyle(.balanced)
+        .background(AppGlassBackground())
+        .background(GlassWindowConfiguration().frame(width: 0, height: 0))
         .tint(GlassTheme.magenta)
-        .font(AppType.body)
+        .font(AppType.ui(15, weight: .regular))
+        .buttonStyle(AppActionButtonStyle())
+        .preferredColorScheme(.dark)
         .groupBoxStyle(GlassGroupBoxStyle())
-        .background(AppPalette.canvas)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation(GlassTheme.animation) {
+                        sidebarCollapsed.toggle()
+                    }
+                } label: {
+                    Label(sidebarCollapsed ? "展开侧边栏" : "收起侧边栏", systemImage: "sidebar.left")
+                }
+                .help(sidebarCollapsed ? "展开侧边栏" : "收起侧边栏")
+            }
+        }
         .alert("本机资料读取错误", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
@@ -118,10 +149,44 @@ struct RootView: View {
         }
     }
 
-    private func navigationRow(_ screen: StudyScreen) -> some View {
-        Label(screen.rawValue, systemImage: screen.symbol)
-            .font(AppType.ui(14, weight: .medium))
-            .tag(screen)
+    private var sidebarRows: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sidebar(.overview).staggered(index: 0)
+            sidebar(.listening).staggered(index: 1)
+            sidebar(.reading).staggered(index: 2)
+            sidebar(.writing).staggered(index: 3)
+            sidebar(.cards).staggered(index: 4)
+            if !sidebarCollapsed {
+                Rectangle().fill(.white.opacity(0.16))
+                    .frame(height: 1)
+                    .padding(.vertical, 14)
+                    .staggered(index: 5)
+                Text("记录")
+                    .font(AppType.ui(12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.50))
+                    .padding(.leading, 13)
+                    .padding(.bottom, 2)
+                    .staggered(index: 6)
+            }
+            sidebar(.dictationHistory).staggered(index: 7)
+            sidebar(.readingHistory).staggered(index: 8)
+            sidebar(.writingHistory).staggered(index: 9)
+            if !sidebarCollapsed {
+                Rectangle().fill(.white.opacity(0.16))
+                    .frame(height: 1)
+                    .padding(.vertical, 14)
+                    .staggered(index: 10)
+            }
+            sidebar(.settings).staggered(index: 11)
+        }
+        .padding(.horizontal, sidebarCollapsed ? 10 : 16)
+        .padding(.top, 20)
+        .padding(.bottom, 12)
+    }
+
+    private func sidebar(_ screen: StudyScreen) -> some View {
+        SidebarNavigationItem(screen: screen, selection: $selectedScreen)
+            .environment(\.sidebarCollapsed, sidebarCollapsed)
     }
 
     @ViewBuilder private var detailContent: some View {
@@ -138,6 +203,86 @@ struct RootView: View {
         case .writingHistory: WritingHistoryView(selectedExerciseID: $selectedWritingExerciseID,
                                                  selectedScreen: $selectedScreen)
         case .cards: CardsView(query: $cardSearchQuery, showDueCards: $showDueCards)
+        case .settings: SettingsView()
+        }
+    }
+}
+
+private struct SidebarCollapsedKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+private extension EnvironmentValues {
+    var sidebarCollapsed: Bool {
+        get { self[SidebarCollapsedKey.self] }
+        set { self[SidebarCollapsedKey.self] = newValue }
+    }
+}
+
+private struct SidebarNavigationItem: View {
+    let screen: StudyScreen
+    @Binding var selection: StudyScreen?
+    @Environment(\.sidebarCollapsed) private var collapsed
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var selected: Bool { selection == screen }
+    private var selectAnimation: Animation { .easeInOut(duration: 0.22) }
+
+    var body: some View {
+        Button { selection = screen } label: {
+            decoratedRow
+                .contentShape(RoundedRectangle(cornerRadius: collapsed ? 14 : 23))
+                .help(collapsed ? screen.rawValue : "")
+        }
+        .buttonStyle(.plain)
+        .animation(reduceMotion ? nil : selectAnimation, value: selected)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    @ViewBuilder private var rowContent: some View {
+        HStack(spacing: collapsed ? 0 : 12) {
+            Image(systemName: screen.symbol)
+                .font(AppType.ui(collapsed ? 20 : 18, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(screen.accent)
+                .frame(width: collapsed ? 40 : 30, height: collapsed ? 40 : 30)
+                .background(screen.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 9))
+            if !collapsed {
+                Text(screen.rawValue)
+                    .font(AppType.ui(15, weight: selected ? .semibold : .medium))
+                    .foregroundStyle(.white.opacity(selected ? 1 : 0.88))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, collapsed ? 8 : 12)
+        .frame(height: collapsed ? 44 : 48)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder private var decoratedRow: some View {
+        if selected {
+            if #available(macOS 26.0, *) {
+                rowContent
+                    .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: collapsed ? 14 : 23))
+                    .glassEffectTransition(.materialize)
+                    .overlay(
+                        LinearGradient(colors: [.white.opacity(0.18), .white.opacity(0.06), .clear],
+                                       startPoint: .top, endPoint: .bottom)
+                            .clipShape(RoundedRectangle(cornerRadius: collapsed ? 14 : 23))
+                    )
+                    .shadow(color: .black.opacity(0.20), radius: 10, y: 5)
+                    .offset(y: -1)
+            } else {
+                rowContent
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: collapsed ? 14 : 23))
+                    .overlay(
+                        LinearGradient(colors: [.white.opacity(0.18), .white.opacity(0.06), .clear],
+                                       startPoint: .top, endPoint: .bottom)
+                            .clipShape(RoundedRectangle(cornerRadius: collapsed ? 14 : 23))
+                    )
+                    .shadow(color: .black.opacity(0.20), radius: 10, y: 5)
+                    .offset(y: -1)
+            }
+        } else {
+            rowContent
         }
     }
 }
@@ -149,38 +294,58 @@ struct StudyChoiceBar<Option: Hashable>: View {
     let label: (Option) -> String
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 12) {
             ForEach(options, id: \.self) { option in
                 Button { selection = option } label: {
                     Text(label(option))
-                        .font(AppType.ui(13, weight: .medium))
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                        .foregroundStyle(selection == option ? Color.accentColor : AppPalette.secondaryInk)
-                        .background(selection == option ? AppPalette.selected : .clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
+                        .font(AppType.ui(15, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 46)
+                        .foregroundStyle(.white)
+                        .background(selection == option ? .white.opacity(0.22) : .white.opacity(0.07),
+                                    in: RoundedRectangle(cornerRadius: 23))
+                        .overlay(RoundedRectangle(cornerRadius: 23)
+                            .strokeBorder(.white.opacity(selection == option ? 0.40 : 0.14)))
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(selection == option ? [.isSelected] : [])
             }
         }
-        .padding(3)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(AppPalette.separator))
+        .padding(10)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 30))
     }
 }
 
 struct StudyPickerChrome: ViewModifier {
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        let shape = Capsule(style: .continuous)
         return content
             .pickerStyle(.menu)
-            .controlSize(.regular)
-            .foregroundStyle(AppPalette.ink)
-            .padding(.horizontal, 10)
-            .frame(minHeight: 30)
-            .background(AppPalette.surface, in: shape)
-            .overlay(shape.strokeBorder(AppPalette.separator))
+            .controlSize(.large)
+            .foregroundStyle(GlassTheme.cyan)
+            .tint(GlassTheme.cyan)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 54)
+            .background(
+                LinearGradient(colors: [
+                    .white.opacity(0.10),
+                    .white.opacity(0.07)
+                ], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: shape
+            )
+            .overlay {
+                shape.strokeBorder(.white.opacity(0.22), lineWidth: 1)
+                    .shadow(color: .black.opacity(0.20), radius: 14, y: 6)
+            }
+            .overlay {
+                shape.fill(
+                    RadialGradient(colors: [GlassTheme.cyan.opacity(0.18), .clear],
+                                   center: .topTrailing, startRadius: 4, endRadius: 180)
+                )
+                .allowsHitTesting(false)
+            }
+            .clipShape(shape)
             .contentShape(shape)
+            .menuStyle(.borderlessButton)
+            .focusEffectDisabled(true)
     }
 }
 
@@ -192,9 +357,10 @@ struct StudyInputChrome: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: GlassTheme.controlRadius, style: .continuous)
         content
-            .textFieldStyle(.roundedBorder)
-            .background(AppPalette.surface, in: shape)
-            .overlay(shape.strokeBorder(AppPalette.separator).allowsHitTesting(false))
+            .textFieldStyle(.plain)
+            .background(.white.opacity(0.10), in: shape)
+            .overlay(shape.strokeBorder(.white.opacity(0.22)).allowsHitTesting(false))
+            .clipShape(shape)
             .contentShape(shape)
     }
 }
@@ -234,22 +400,22 @@ struct StudyEmptyState: View {
                 .font(AppType.ui(25, weight: .light))
                 .foregroundStyle(GlassTheme.cyan)
                 .frame(width: 52, height: 52)
-                .background(AppPalette.selected, in: RoundedRectangle(cornerRadius: 12))
+                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 15))
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
                     .font(AppType.ui(18, weight: .semibold))
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(.white)
                 Text(message)
                     .font(AppType.ui(15, weight: .regular))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.67))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator))
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 30))
+        .overlay(RoundedRectangle(cornerRadius: 30).strokeBorder(.white.opacity(0.15)))
     }
 }
 
@@ -265,13 +431,13 @@ struct PageHeading: View {
                 .tracking(2)
                 .foregroundStyle(GlassTheme.cyan)
             Text(title)
-                .font(AppType.pageTitle)
-                .foregroundStyle(AppPalette.ink)
+                .font(AppType.ui(32, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.94))
             Text(subtitle)
                 .foregroundStyle(GlassTheme.secondaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 8)
+        .padding(.bottom, 16)
     }
 }
 
@@ -336,7 +502,7 @@ struct ActivityHeatmap: View {
             if !hasRecentActivity {
                 Text("最近 90 天暂无学习记录；完成听写、阅读或写作后，对应日期会着色。")
                     .font(AppType.ui(12, weight: .regular))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.68))
             }
         }
         .frame(maxWidth: 800, alignment: .leading)
@@ -345,7 +511,7 @@ struct ActivityHeatmap: View {
 
     static func color(for words: Int) -> Color {
         switch words {
-        case 0: AppPalette.ink.opacity(0.08)
+        case 0: Color.white.opacity(0.08)
         case 1..<30: GlassTheme.cyan.opacity(0.33)
         case 30..<100: GlassTheme.cyan.opacity(0.52)
         case 100..<250: GlassTheme.violet.opacity(0.72)

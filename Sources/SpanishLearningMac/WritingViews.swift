@@ -82,10 +82,7 @@ struct WritingView: View {
                         .foregroundStyle(GlassTheme.cyan)
                     Text("把听过、读过的，写成自己的西语。")
                         .font(AppType.ui(32, weight: .semibold))
-                        .foregroundStyle(AppPalette.ink)
-                    Label("输入草稿会自动保存在本机；提交后才写入练习记录。", systemImage: "externaldrive")
-                        .font(AppType.ui(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.white.opacity(0.94))
                 }
                 HStack(spacing: 10) {
                     ForEach(WritingMode.allCases) { option in
@@ -99,19 +96,18 @@ struct WritingView: View {
                             Text(option.rawValue)
                                 .font(AppType.ui(15, weight: .semibold))
                                 .frame(maxWidth: .infinity, minHeight: 46)
-                                .foregroundStyle(AppPalette.ink)
-                                .foregroundStyle(mode == option ? Color.accentColor : AppPalette.secondaryInk)
-                                .background(mode == option ? AppPalette.selected : AppPalette.surface,
+                                .foregroundStyle(.white)
+                                .background(mode == option ? .white.opacity(0.22) : .white.opacity(0.07),
                                             in: RoundedRectangle(cornerRadius: 22))
                                 .overlay(RoundedRectangle(cornerRadius: 22)
-                                    .strokeBorder(mode == option ? Color.accentColor.opacity(0.45) : AppPalette.separator)
+                                    .strokeBorder(.white.opacity(mode == option ? 0.40 : 0.14))
                                     .allowsHitTesting(false))
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(8)
-                .background(AppPalette.sidebar, in: RoundedRectangle(cornerRadius: 12))
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 28))
 
                 VStack(alignment: .leading, spacing: 16) {
                     preparationPanel
@@ -153,18 +149,17 @@ struct WritingView: View {
                                 Label(kind.rawValue, systemImage: kind == .listening ? "waveform" : "book.closed")
                                     .font(AppType.ui(14, weight: .semibold))
                                     .frame(maxWidth: .infinity, minHeight: 42)
-                                    .foregroundStyle(sourceKind == kind ? Color.accentColor : AppPalette.secondaryInk)
-                                    .background(sourceKind == kind ? AppPalette.selected : AppPalette.surface,
+                                    .background(sourceKind == kind ? Color.accentColor.opacity(0.22) : Color.white.opacity(0.07),
                                                 in: RoundedRectangle(cornerRadius: 12))
                                     .overlay(RoundedRectangle(cornerRadius: 12)
-                                        .strokeBorder(sourceKind == kind ? Color.accentColor.opacity(0.45) : AppPalette.separator)
+                                        .strokeBorder(.white.opacity(sourceKind == kind ? 0.38 : 0.14))
                                         .allowsHitTesting(false))
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .padding(6)
-                    .background(AppPalette.sidebar, in: RoundedRectangle(cornerRadius: 10))
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16))
                     if visibleSources.isEmpty {
                         ContentUnavailableView(sourceKind == .reading ? "还没有阅读材料" : "还没有听力句子",
                                                systemImage: sourceKind == .reading ? "text.book.closed" : "waveform",
@@ -184,7 +179,7 @@ struct WritingView: View {
                                     Spacer(minLength: 0)
                                     Image(systemName: "chevron.down")
                                         .font(AppType.ui(13, weight: .semibold))
-                                        .foregroundStyle(AppPalette.secondaryInk)
+                                        .foregroundStyle(.white.opacity(0.86))
                                 }
                             }
                             .menuIndicator(.hidden)
@@ -230,10 +225,10 @@ struct WritingView: View {
                             }
                         }
                         .font(AppType.ui(14))
-                        .foregroundStyle(AppPalette.ink)
+                        .foregroundStyle(.white.opacity(0.88))
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10))
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22))
                     }
                 }
                 if working { ProgressView().controlSize(.small) }
@@ -293,7 +288,7 @@ struct WritingView: View {
                 .foregroundStyle(.secondary)
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 Divider()
                 Text("你的西语").font(AppType.ui(17, weight: .semibold))

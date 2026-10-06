@@ -14,6 +14,10 @@ struct ReadingView: View {
     @State private var working = false
     @State private var isAuditingCards = false
 
+    private let ink = Color(red: 0.91, green: 0.89, blue: 0.95)
+    private let secondaryInk = Color(red: 0.78, green: 0.75, blue: 0.84)
+    private let accentInk = Color(red: 0.88, green: 0.78, blue: 1.00)
+
     private var article: ReadingArticle? {
         store.data.articles.first(where: { $0.id == selectedArticleID }) ?? store.data.articles.first
     }
@@ -42,7 +46,7 @@ struct ReadingView: View {
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.down")
                                 .font(AppType.ui(13, weight: .semibold))
-                                .foregroundStyle(AppPalette.secondaryInk)
+                                .foregroundStyle(.white.opacity(0.86))
                         }
                     }
                     .menuIndicator(.hidden)
@@ -122,15 +126,15 @@ struct ReadingView: View {
                 .font(AppType.ui(34, weight: .light))
                 .foregroundStyle(GlassTheme.cyan)
                 .frame(width: 64, height: 64)
-                .background(AppPalette.selected, in: RoundedRectangle(cornerRadius: 18))
+                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
             VStack(alignment: .leading, spacing: 12) {
                 Text("从一篇文章开始。")
                     .font(AppType.ui(30, weight: .semibold))
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(.white)
                 Text("粘贴你感兴趣的西语原文。导入后会分成约 50 词的段落，方便逐段通读、提问和积累卡片。")
                     .font(AppType.ui(16))
                     .lineSpacing(7)
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.76))
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
@@ -138,20 +142,20 @@ struct ReadingView: View {
                 Label("提问与卡片", systemImage: "rectangle.stack")
             }
             .font(AppType.ui(15, weight: .medium))
-            .foregroundStyle(AppPalette.secondaryInk)
+            .foregroundStyle(.white.opacity(0.72))
             Spacer(minLength: 0)
         }
         .padding(32)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator))
+        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 34))
+        .overlay(RoundedRectangle(cornerRadius: 34).strokeBorder(.white.opacity(0.17)))
     }
 
     private var inlineArticleImport: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("导入文章")
                 .font(AppType.ui(23, weight: .semibold))
-                .foregroundStyle(AppPalette.ink)
+                .foregroundStyle(.white)
             TextEditor(text: $newText)
                 .font(AppType.ui(16))
                 .scrollContentBackground(.hidden)
@@ -162,7 +166,7 @@ struct ReadingView: View {
             HStack {
                 Text("粘贴西语正文")
                     .font(AppType.ui(15, weight: .regular))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(.white.opacity(0.62))
                 Spacer()
                 Button("导入并切段", systemImage: "arrow.right") { importInlineArticle() }
                     .buttonStyle(AppActionButtonStyle(prominent: true))
@@ -171,8 +175,8 @@ struct ReadingView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator))
+        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 34))
+        .overlay(RoundedRectangle(cornerRadius: 34).strokeBorder(.white.opacity(0.17)))
     }
 
     private func importInlineArticle() { importArticle(newText, fromSheet: false) }
@@ -203,47 +207,44 @@ struct ReadingView: View {
                 Text(chunk.text)
                     .font(AppType.reading(20))
                     .lineSpacing(9)
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(ink)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 20)
             }
-            Divider()
+            Divider().overlay(secondaryInk.opacity(0.16))
             HStack(spacing: 12) {
                 Button("上一段", systemImage: "chevron.left") { changeChunk(-1) }
                     .disabled(chunkIndex == 0)
                 Spacer()
                 Text("\(chunk.ordinal) / \(article.chunks.count)")
                     .font(AppType.ui(15, weight: .medium))
-                    .foregroundStyle(AppPalette.secondaryInk)
+                    .foregroundStyle(secondaryInk)
                 Spacer()
                 Button("下一段", systemImage: "chevron.right") { changeChunk(1) }
                     .disabled(chunkIndex >= article.chunks.count - 1)
             }
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(accentInk)
             .buttonStyle(.plain)
             .padding(.top, 14)
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator).allowsHitTesting(false))
+        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 36))
+        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.18)).allowsHitTesting(false))
     }
 
     private func studyPanel(article: ReadingArticle, chunk: ReadingChunk) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("精读提问")
                 .font(AppType.ui(17, weight: .semibold))
-                .foregroundStyle(AppPalette.ink)
-            Label("问题和备注草稿会自动保存在本机。", systemImage: "externaldrive")
-                .font(AppType.ui(12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ink)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if (chunk.discussion ?? []).isEmpty {
                         Text("选中文中不懂的地方，直接提问。")
                             .font(AppType.ui(15, weight: .regular))
-                            .foregroundStyle(AppPalette.secondaryInk)
+                            .foregroundStyle(secondaryInk)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 10)
                     }
@@ -252,14 +253,14 @@ struct ReadingView: View {
                             // Question (highlighted)
                             ZStack(alignment: .leading) {
                                 RoundedRectangle(cornerRadius: 14)
-                                    .fill(AppPalette.selected)
+                                    .fill(accentInk.opacity(0.18))
                                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                                     RoundedRectangle(cornerRadius: 3)
-                                        .fill(Color.accentColor)
+                                        .fill(accentInk)
                                         .frame(width: 4, height: 18)
                                     Text(item.question)
                                         .font(AppType.ui(15, weight: .semibold))
-                                        .foregroundStyle(AppPalette.ink)
+                                        .foregroundStyle(.white)
                                         .lineLimit(nil)
                                 }
                                 .padding(.horizontal, 10)
@@ -270,25 +271,25 @@ struct ReadingView: View {
                             // Answer
                             Text(item.answer)
                                 .font(AppType.ui(15, weight: .regular))
-                                .foregroundStyle(AppPalette.ink)
+                                .foregroundStyle(ink)
                                 .lineSpacing(6)
                                 .textSelection(.enabled)
                         }
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppPalette.separator))
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 20))
+                        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.14)))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
-            Divider()
+            Divider().overlay(secondaryInk.opacity(0.16))
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("想问什么？", text: $questionDraft, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .foregroundStyle(AppPalette.ink)
+                    .foregroundStyle(ink)
                     .lineLimit(1...3)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
@@ -300,18 +301,18 @@ struct ReadingView: View {
             }
             Text("理解难度")
                 .font(AppType.ui(12, weight: .semibold))
-                .foregroundStyle(AppPalette.secondaryInk)
+                .foregroundStyle(secondaryInk)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
                 ForEach(ReadingDifficulty.allCases) { value in
                     Button { difficulty = value } label: {
                         Text(value.rawValue)
                             .font(AppType.ui(14, weight: .medium))
-                            .foregroundStyle(difficulty == value ? Color.accentColor : AppPalette.secondaryInk)
+                            .foregroundStyle(difficulty == value ? ink : secondaryInk)
                             .frame(maxWidth: .infinity, minHeight: 42)
-                            .background(difficulty == value ? AppPalette.selected : AppPalette.surface,
+                            .background(difficulty == value ? .white.opacity(0.22) : .white.opacity(0.08),
                                         in: RoundedRectangle(cornerRadius: 19))
                             .overlay(RoundedRectangle(cornerRadius: 19)
-                                .strokeBorder(difficulty == value ? Color.accentColor.opacity(0.45) : AppPalette.separator)
+                                .strokeBorder(.white.opacity(difficulty == value ? 0.48 : 0.14))
                                 .allowsHitTesting(false))
                             .contentShape(RoundedRectangle(cornerRadius: 19))
                     }
@@ -321,7 +322,7 @@ struct ReadingView: View {
             }
             TextField("本段备注（可留空）", text: $note)
                 .textFieldStyle(.plain)
-                .foregroundStyle(AppPalette.ink)
+                .foregroundStyle(ink)
                 .padding(.horizontal, 12)
                 .frame(minHeight: 38)
                 .studyInputChrome()
@@ -330,7 +331,7 @@ struct ReadingView: View {
                 if let status {
                     Text(status)
                         .font(AppType.ui(12, weight: .regular))
-                        .foregroundStyle(AppPalette.secondaryInk)
+                        .foregroundStyle(secondaryInk)
                         .lineLimit(2)
                         .textSelection(.enabled)
                 }
@@ -342,8 +343,8 @@ struct ReadingView: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator).allowsHitTesting(false))
+        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 36))
+        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.18)).allowsHitTesting(false))
     }
 
     private func changeChunk(_ delta: Int) {
