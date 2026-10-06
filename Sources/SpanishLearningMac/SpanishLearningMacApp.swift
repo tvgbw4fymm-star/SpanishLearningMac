@@ -508,7 +508,7 @@ struct SettingsView: View {
 
     private func chooseBackupDestination() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "西语学习备份-\(Date.now.formatted(.iso8601.year().month().day().dateSeparator(.dash))).zip"
+        panel.nameFieldStringValue = "西语喵备份-\(Date.now.formatted(.iso8601.year().month().day().dateSeparator(.dash))).zip"
         panel.allowedContentTypes = [.zip]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         notice = "正在创建备份…"

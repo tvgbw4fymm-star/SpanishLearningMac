@@ -86,7 +86,7 @@ struct OverviewView: View {
             Image(systemName: "sparkle")
                 .font(AppType.ui(19, weight: .medium))
                 .foregroundStyle(AppPalette.ink.opacity(0.9))
-            Text("西语学习")
+            Text("西语喵")
                 .font(AppType.ui(16, weight: .semibold))
                 .foregroundStyle(AppPalette.ink)
                 .fixedSize(horizontal: true, vertical: false)

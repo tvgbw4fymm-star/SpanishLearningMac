@@ -3,12 +3,12 @@ set -euo pipefail
 
 # Official Release build + packaging for Desktop distribution.
 # Produces:
-#   ~/Desktop/西语学习.app
-#   ~/Desktop/西语学习.zip
+#   ~/Desktop/西语喵.app
+#   ~/Desktop/西语喵.zip
 # Does not touch dist/, does not commit, does not touch user data.
 
 PROJECT_ROOT="${0:A:h:h}"
-APP_DISPLAY_NAME="西语学习"
+APP_DISPLAY_NAME="西语喵"
 BUNDLE_ID="com.kda.spanishlearningmac"
 APP_VERSION="0.6.0"
 DESKTOP="$HOME/Desktop"
