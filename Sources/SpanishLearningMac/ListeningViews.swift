@@ -3,8 +3,27 @@ import AVFoundation
 import AppKit
 import UniformTypeIdentifiers
 
+private struct ListeningLearningPointsDraft: Codable {
+    struct Item: Codable {
+        let id: UUID
+        let category: CardCategory
+        let prompt: String
+    }
+
+    let items: [Item]
+
+    init(points: [LearningPointRequest]) {
+        items = points.map { Item(id: $0.id, category: $0.category, prompt: $0.prompt) }
+    }
+
+    var points: [LearningPointRequest] {
+        items.map { LearningPointRequest(id: $0.id, category: $0.category, prompt: $0.prompt) }
+    }
+}
+
 struct ListeningView: View {
     @EnvironmentObject private var store: StudyStore
+    @EnvironmentObject private var editingDrafts: EditingDraftStore
     @Binding var selectedID: UUID?
     @Binding var selectedSentenceID: UUID?
     @State private var player: AVAudioPlayer?
@@ -14,256 +33,880 @@ struct ListeningView: View {
     @State private var playbackEndSeconds = 0.0
     @State private var draft = ""
     @State private var draftSaveTask: Task<Void, Never>?
-    @State private var showReview = false
+    @State private var draftMaterialID: UUID?
+    @State private var draftSentenceID: UUID?
+    @State private var isLoadingDraft = false
+    @State private var isReviewingTranscript = false
+    @State private var reviewText = ""
+    @State private var reviewStart = ""
+    @State private var reviewEnd = ""
+    @State private var reviewMaterialID: UUID?
+    @State private var reviewSentenceID: UUID?
+    @State private var reviewStatus: String?
+    @State private var reviewSpeechReference: String?
+    @State private var reviewAISuggestion: TranscriptProofreadingResult?
+    @State private var isReviewSpeechWorking = false
+    @State private var isReviewAIWorking = false
+    @State private var reviewSplitTarget: ListeningSentence?
+    @State private var confirmingReviewDiscard = false
     @State private var status: String?
     @State private var learningPoints: [LearningPointRequest] = ListeningView.defaultPoints()
     @State private var isAnalyzingListening = false
     @State private var isGeneratingCards = false
     @State private var isAuditingCards = false
     @State private var showPasteSubtitles = false
+    @State private var showInspector = true
+    @FocusState private var dictationIsFocused: Bool
 
     private var material: AudioMaterial? {
         store.data.audioMaterials.first(where: { $0.id == selectedID }) ?? store.data.audioMaterials.first
     }
     private var sentence: ListeningSentence? {
-        guard let material else { return nil }
-        return material.sentences.first(where: { $0.id == selectedSentenceID }) ?? material.sentences.first
+        guard let material, let selectedSentenceID else { return nil }
+        return material.sentences.first(where: { $0.id == selectedSentenceID })
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .top) {
-                    PageHeading(eyebrow: "Listening studio", title: "听一遍，再写下来。",
-                                subtitle: "选择语料，逐句核对，按自己的节奏练习。")
+        Group {
+            if let material {
+                HSplitView {
+                    listeningNavigator(material)
+                        .frame(minWidth: 210, idealWidth: 250, maxWidth: 310)
+                    studyCanvas(material)
+                        .frame(minWidth: 400, idealWidth: 560, maxWidth: .infinity,
+                               maxHeight: .infinity)
                 }
-                if store.data.audioMaterials.isEmpty {
-                    VStack(spacing: 16) {
-                        ContentUnavailableView("尚无音频", systemImage: "waveform",
-                                               description: Text("选择本机的 MP3、M4A 或 WAV 文件开始。"))
-                        HStack(spacing: 12) {
-                            Button("导入音频/视频", systemImage: "plus") { importMedia() }
-                                .buttonStyle(AppActionButtonStyle(prominent: true))
-                            Button("导入字幕文件", systemImage: "captions.bubble") {
-                                status = "请先导入音频，再为对应语料导入字幕文件或粘贴字幕。"
-                            }
-                            .buttonStyle(AppActionButtonStyle())
-                        }
-                        Text("支持 MP3、M4A、WAV、MP4 和 MOV；导入音频后可选择 SRT/VTT 字幕或直接粘贴。")
-                            .font(AppType.ui(12))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                } else if let material {
-                    Picker("选择语料", selection: $selectedID) {
-                        ForEach(store.data.audioMaterials) { item in
-                            Text(item.title).tag(Optional(item.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .studyPickerChrome()
-                    .frame(maxWidth: 620)
-                    .onChange(of: selectedID) { _, _ in selectedSentenceID = nil }
-                    HStack(spacing: 12) {
-                        Button("导入音频/视频", systemImage: "plus") { importMedia() }
-                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                        Button("导入字幕文件", systemImage: "captions.bubble") { importSubtitles(material) }
-                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                            .disabled(store.activeTranscriptions.contains(material.id))
-                        Button("粘贴字幕", systemImage: "doc.on.clipboard") { showPasteSubtitles = true }
-                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                        Text("有字幕时保留字幕文本并校准音频时间；无字幕时使用本机转写。")
-                            .font(AppType.ui(12)).foregroundStyle(.secondary)
-                    }
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ViewThatFits(in: .horizontal) {
-                                HStack(spacing: 18) {
-                                    materialSummary(material)
-                                        .fixedSize(horizontal: true, vertical: false)
-                                    Spacer(minLength: 8)
-                                    materialActions(material)
-                                }
-                                VStack(alignment: .leading, spacing: 16) {
-                                    materialSummary(material)
-                                    materialActions(material)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            if store.activeTranscriptions.contains(material.id) {
-                                HStack {
-                                    ProgressView().controlSize(.small)
-                                    Text(material.referenceSubtitleCues?.isEmpty == false
-                                         ? "正在校准字幕时间…"
-                                         : "正在本机转写…")
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("暂停") { store.pauseTranscription(materialID: material.id) }
-                                }
-                            }
-                            if material.segmentationSource != .subtitle,
-                               let progress = store.transcriptionStatus[material.id] {
-                                Text(progress).font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                            }
-                            if !material.sentences.isEmpty {
-                                HStack(spacing: 12) {
-                                    Button("核对字幕与分句", systemImage: "text.badge.checkmark") { showReview = true }
-                                        .buttonStyle(AppActionButtonStyle())
-                                    if material.transcriptionComplete == true,
-                                       material.sentences.contains(where: { $0.status == .generated }) {
-                                        Button("开始逐句听写", systemImage: "play.fill") {
-                                            do {
-                                                try store.verifyTranscript(materialID: material.id)
-                                                selectedSentenceID = material.sentences.first?.id
-                                                status = "已进入逐句听写。可以先播放，再写下听到的内容。"
-                                            } catch { status = error.localizedDescription }
-                                        }
-                                        .buttonStyle(AppActionButtonStyle(prominent: true))
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    }
-                    if !material.sentences.isEmpty,
-                       material.transcriptionComplete == true,
-                       !material.sentences.contains(where: { $0.status == .generated }),
-                       let sentence {
-                        GroupBox {
-                            VStack(alignment: .leading, spacing: 16) {
-                                Picker("选择句子", selection: $selectedSentenceID) {
-                                    ForEach(material.sentences) { item in
-                                        Text("第 \(item.ordinal) 句 · \(formatTime(item.startSeconds))")
-                                            .tag(Optional(item.id))
-                                    }
-                                }
-                                .labelsHidden()
-                                .studyPickerChrome()
-                                .frame(maxWidth: 340)
-                                HStack {
-                                    Text("第 \(sentence.ordinal) 句 / 共 \(material.sentences.count) 句")
-                                        .font(AppType.ui(17, weight: .semibold))
-                                    Spacer()
-                                    Text("\(formatTime(sentence.startSeconds)) – \(formatTime(sentence.endSeconds))")
-                                        .font(AppType.ui(12).monospacedDigit()).foregroundStyle(.secondary)
-                                }
-                                HStack(spacing: 12) {
-                                    Button(playing && playbackSentenceID == sentence.id ? "暂停" :
-                                           player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
-                                           systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill") {
-                                        togglePlayback(material: material, sentence: sentence)
-                                    }
-                                    .buttonStyle(AppActionButtonStyle(prominent: true))
-                                    Button("下一句") {
-                                        persistDraft()
-                                        nextSentence(material, sentence)
-                                    }
-                                    .buttonStyle(SecondaryPlaybackButtonStyle())
-                                    .disabled(sentence.ordinal >= material.sentences.count)
-                                    Button("后退 2 秒", systemImage: "gobackward.2") { seek(sentence: sentence, by: -2) }
-                                        .buttonStyle(SecondaryPlaybackButtonStyle())
-                                        .disabled(player == nil || playbackSentenceID != sentence.id)
-                                    Button("前进 2 秒", systemImage: "goforward.2") { seek(sentence: sentence, by: 2) }
-                                        .buttonStyle(SecondaryPlaybackButtonStyle())
-                                        .disabled(player == nil || playbackSentenceID != sentence.id)
-                                    Button("重听", systemImage: "arrow.clockwise") { play(material: material, sentence: sentence) }
-                                        .buttonStyle(SecondaryPlaybackButtonStyle())
-                                }
-                                Text("你听到了什么？").font(AppType.ui(14, weight: .semibold))
-                                TextEditor(text: $draft)
-                                    .font(AppType.ui(17))
-                                    .frame(height: 88)
-                                    .scrollContentBackground(.hidden)
-                                    .padding(8)
-                                    .studyInputChrome()
-                                    .disabled(sentence.answerRevealed == true)
-                                if sentence.answerRevealed == true {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("原句").font(AppType.ui(12, weight: .semibold)).foregroundStyle(.secondary)
-                                        Text(sentence.transcript).font(AppType.reading(19)).textSelection(.enabled)
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(16)
-                                    .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                                    Button("再听，再写同一句", systemImage: "arrow.counterclockwise") {
-                                        retry(material, sentence)
-                                    }
-                                    VStack(alignment: .leading, spacing: 16) {
-                                        if let analysis = sentence.analysis {
-                                            ListeningAnalysisView(analysis: analysis)
-                                            if let count = sentence.learningPoints?.count, count > 0 {
-                                                Text("已生成 \(count) 张卡片草稿，可到“卡片”中检查。")
-                                                    .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                                            }
-                                            HStack {
-                                                Spacer()
-                                                if isAnalyzingListening { ProgressView().controlSize(.small) }
-                                                Button("重新分析", systemImage: "arrow.clockwise") {
-                                                    analyzeListening(material, sentence)
-                                                }
-                                                .buttonStyle(.borderless)
-                                                .disabled(isAnalyzingListening)
-                                            }
-                                        } else {
-                                            HStack {
-                                                Text("先分析这句为什么不容易听懂，再决定要积累什么。")
-                                                    .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                                                Spacer()
-                                                if isAnalyzingListening { ProgressView().controlSize(.small) }
-                                                Button("AI 听力分析", systemImage: "waveform.and.magnifyingglass") {
-                                                    analyzeListening(material, sentence)
-                                                }
-                                                .buttonStyle(AppActionButtonStyle(prominent: true))
-                                                .disabled(isAnalyzingListening)
-                                            }
-                                        }
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(16)
-                                    .background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
-                                    LearningPointsEditor(points: $learningPoints)
-                                    HStack {
-                                        Spacer()
-                                        if isGeneratingCards || isAuditingCards { ProgressView().controlSize(.small) }
-                                        Button("生成卡片草稿") {
-                                            generateListeningCards(material, sentence)
-                                        }
-                                        .buttonStyle(AppActionButtonStyle(prominent: true))
-                                        .disabled(isGeneratingCards || isAuditingCards)
-                                    }
-                                } else {
-                                    HStack {
-                                        Spacer()
-                                        Button("看答案") { reveal(material, sentence) }
-                                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 10)
-                        }
-                    } else if !material.sentences.isEmpty {
-                        Text(material.transcriptionComplete == true ? "字幕已切句。点击“核对字幕与分句”，完成后即可逐句听写。" : "本机转写尚未完成；也可导入带时间戳字幕开始核对。")
-                            .font(AppType.ui(15, weight: .regular)).foregroundStyle(.secondary)
-                    }
+                .background(AppPalette.canvas)
+                .inspector(isPresented: $showInspector) {
+                    learningInspector(material)
+                        .inspectorColumnWidth(min: 250, ideal: 300, max: 380)
                 }
-                if let status { Text(status).font(AppType.ui(15, weight: .regular)).foregroundStyle(.secondary).textSelection(.enabled) }
+            } else {
+                emptyLibrary
             }
-            .frame(maxWidth: 920)
-            .frame(maxWidth: .infinity)
-            .padding(32)
         }
-        .onAppear { if selectedID == nil { selectedID = store.data.audioMaterials.first?.id }; loadDraft(); loadLearningPoints() }
-        .onDisappear { stopAudio(); persistDraft() }
-        .onChange(of: selectedID) { _, _ in stopAudio(); loadDraft(); loadLearningPoints() }
-        .onChange(of: selectedSentenceID) { _, _ in stopAudio(); loadDraft(); loadLearningPoints() }
-        .onChange(of: draft) { _, _ in scheduleDraftSave() }
-        .sheet(isPresented: $showReview) {
-            if let material { TranscriptReviewSheet(materialID: material.id) }
+        .onAppear {
+            if selectedID == nil { selectedID = store.data.audioMaterials.first?.id }
+            if let material, !material.sentences.contains(where: { $0.id == selectedSentenceID }) {
+                selectedSentenceID = material.sentences.first?.id
+            }
+            loadDraft()
+            loadLearningPoints()
         }
+        .onDisappear {
+            stopAudio()
+            persistDraft()
+            persistTranscriptReviewDraft()
+        }
+        .onChange(of: selectedID) { _, _ in
+            persistDraft()
+            stopAudio()
+            persistTranscriptReviewDraft()
+            if let material, !material.sentences.contains(where: { $0.id == selectedSentenceID }) {
+                selectedSentenceID = material.sentences.first?.id
+            }
+            loadDraft()
+            if isReviewingTranscript { loadTranscriptReviewDraft() }
+            loadLearningPoints()
+        }
+        .onChange(of: selectedSentenceID) { _, _ in
+            persistDraft()
+            stopAudio()
+            persistTranscriptReviewDraft()
+            loadDraft()
+            if isReviewingTranscript { loadTranscriptReviewDraft() }
+            loadLearningPoints()
+        }
+        .onChange(of: draft) { _, _ in
+            if !isLoadingDraft { scheduleDraftSave() }
+        }
+        .onChange(of: reviewText) { _, _ in persistTranscriptReviewDraft() }
+        .onChange(of: reviewStart) { _, _ in persistTranscriptReviewDraft() }
+        .onChange(of: reviewEnd) { _, _ in persistTranscriptReviewDraft() }
         .sheet(isPresented: $showPasteSubtitles) {
             if let material { PasteSubtitleSheet(materialID: material.id) }
         }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if let material {
+                    if isReviewingTranscript {
+                        Button("返回练习", systemImage: "arrow.uturn.backward") {
+                            exitTranscriptReview()
+                        }
+                        Button("完成核对", systemImage: "checkmark.circle") {
+                            completeTranscriptReview(material)
+                        }
+                        .disabled(material.transcriptionComplete != true || hasOtherTranscriptReviewDrafts(material))
+                        .help(reviewCompletionHelp(material))
+                    } else {
+                        Button("核对分句", systemImage: "text.badge.checkmark") {
+                            enterTranscriptReview()
+                        }
+                        .disabled(material.sentences.isEmpty)
+                    }
+                }
+                Menu {
+                    Button("导入音频或视频…", systemImage: "plus") { importMedia() }
+                    if let material {
+                        Divider()
+                        Button("导入字幕文件…", systemImage: "captions.bubble") {
+                            importSubtitles(material)
+                        }
+                        .disabled(store.activeTranscriptions.contains(material.id))
+                        Button("粘贴字幕…", systemImage: "doc.on.clipboard") {
+                            showPasteSubtitles = true
+                        }
+                    }
+                } label: {
+                    Label("材料", systemImage: "ellipsis.circle")
+                }
+                .help("导入或管理听力材料")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Toggle(isOn: $showInspector) {
+                    Label("学习检查器", systemImage: "sidebar.trailing")
+                }
+                .toggleStyle(.button)
+                .help(showInspector ? "隐藏学习检查器" : "显示学习检查器")
+            }
+        }
+    }
+
+    private var emptyLibrary: some View {
+        ContentUnavailableView {
+            Label("开始一次听力练习", systemImage: "waveform")
+        } description: {
+            Text("导入本机音频或视频。转写和学习资料保留在这台 Mac 上。")
+        } actions: {
+            Button("导入音频或视频…", systemImage: "plus") { importMedia() }
+                .buttonStyle(.borderedProminent)
+            Button("导入字幕文件…", systemImage: "captions.bubble") {
+                status = "请先导入音频，再为对应语料导入字幕文件或粘贴字幕。"
+            }
+            .buttonStyle(.bordered)
+            Text("支持 MP3、M4A、WAV、MP4、MOV，以及 SRT / VTT 字幕。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            if let status {
+                Text(status)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding()
+            }
+        }
+    }
+
+    private func listeningNavigator(_ material: AudioMaterial) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Picker("当前媒体", selection: $selectedID) {
+                    ForEach(store.data.audioMaterials) { item in
+                        Text(item.title)
+                            .lineLimit(1)
+                            .tag(Optional(item.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("当前媒体")
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button(action: importMedia) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("导入音频或视频")
+                .accessibilityLabel("导入音频或视频")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(material.title)
+                    .font(AppType.ui(13, weight: .semibold))
+                    .lineLimit(2)
+                Label("\(material.sentences.count) 句 · \(materialState(material))",
+                      systemImage: materialStateSymbol(material))
+                    .font(AppType.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 14)
+
+            Divider()
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("句子")
+                    .font(AppType.ui(13, weight: .semibold))
+                Spacer()
+                Text("\(material.sentences.count)")
+                    .font(.system(.caption, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+
+            if material.sentences.isEmpty {
+                ContentUnavailableView("尚无句子", systemImage: "text.alignleft",
+                                       description: Text("导入字幕或开始本机转写后，句子会显示在这里。"))
+                    .font(.callout)
+            } else {
+                List(selection: $selectedSentenceID) {
+                    ForEach(material.sentences) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Text("句子 \(item.ordinal)")
+                                        .font(AppType.ui(12, weight: .medium))
+                                    Spacer(minLength: 0)
+                                    Label(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID),
+                                          systemImage: sentenceStateSymbol(item))
+                                        .font(AppType.caption)
+                                        .foregroundStyle(sentenceStateColor(item))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                }
+                                Text(item.transcript)
+                                    .font(AppType.ui(12))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                Text("\(formatTime(item.startSeconds)) – \(formatTime(item.endSeconds))")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(
+                            "句子 \(item.ordinal)，\(sentenceStateLabel(item, isSelected: item.id == selectedSentenceID))，\(item.transcript)"
+                        )
+                        .accessibilityValue(
+                            "\(formatTime(item.startSeconds)) 到 \(formatTime(item.endSeconds))"
+                        )
+                        .tag(item.id)
+                    }
+                }
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(AppPalette.sidebar.opacity(0.5))
+    }
+
+    private func studyCanvas(_ material: AudioMaterial) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    materialSummary(material)
+                    Spacer(minLength: 10)
+                    materialActions(material)
+                }
+
+                if store.activeTranscriptions.contains(material.id) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(material.referenceSubtitleCues?.isEmpty == false
+                             ? "正在校准字幕时间…"
+                             : "正在本机转写…")
+                            .font(AppType.ui(12))
+                        Spacer()
+                        Button("暂停") { store.pauseTranscription(materialID: material.id) }
+                            .buttonStyle(.borderless)
+                    }
+                } else if let progress = store.transcriptionStatus[material.id] {
+                    Text(progress)
+                        .font(AppType.ui(11))
+                        .foregroundStyle(.secondary)
+                }
+
+                if !material.sentences.isEmpty {
+                    HStack {
+                        Button(playing && playbackSentenceID == nil ? "暂停整段" :
+                               player != nil && playbackSentenceID == nil ? "继续整段" : "整段播放",
+                               systemImage: playing && playbackSentenceID == nil ? "pause.fill" : "play.fill") {
+                            togglePlayback(material: material, sentence: nil)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Text("整段音频")
+                            .font(AppType.ui(11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 15)
+
+            Divider()
+
+            if isReviewingTranscript {
+                transcriptReviewWorkspace(material)
+            } else if canDictate(material) {
+                if let sentence {
+                    dictationWorkspace(material, sentence)
+                } else {
+                    ContentUnavailableView("选择一句开始", systemImage: "text.alignleft",
+                                           description: Text("从左侧列表选择要听写的句子。"))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                preparationState(material)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func dictationWorkspace(_ material: AudioMaterial, _ sentence: ListeningSentence) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("句子 \(sentence.ordinal)")
+                    .font(AppType.pageTitle)
+                Text("of \(material.sentences.count)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(formatTime(sentence.startSeconds)) – \(formatTime(sentence.endSeconds))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button(playing && playbackSentenceID == sentence.id ? "暂停" :
+                       player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
+                       systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill") {
+                    togglePlayback(material: material, sentence: sentence)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .keyboardShortcut("r", modifiers: [.command])
+                Button("重听", systemImage: "arrow.clockwise") {
+                    play(material: material, sentence: sentence)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                Button("后退 2 秒", systemImage: "gobackward.2") {
+                    seek(sentence: sentence, by: -2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(player == nil || playbackSentenceID != sentence.id)
+                Button("前进 2 秒", systemImage: "goforward.2") {
+                    seek(sentence: sentence, by: 2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(player == nil || playbackSentenceID != sentence.id)
+            }
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text(sentence.answerRevealed == true ? "你的听写" : "你听到了什么？")
+                        .font(AppType.ui(13, weight: .semibold))
+                    Spacer()
+                    Text("草稿自动保存")
+                        .font(AppType.ui(11))
+                        .foregroundStyle(.tertiary)
+                }
+                if sentence.answerRevealed == true {
+                    Text(draft.isEmpty ? "（未填写听写）" : draft)
+                        .font(AppType.studyText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+                        .padding(12)
+                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("原句")
+                            .font(AppType.ui(11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(sentence.transcript)
+                            .font(AppType.reading(20))
+                            .lineSpacing(5)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.green.opacity(0.2)))
+                    Button("再听，再写同一句", systemImage: "arrow.counterclockwise") {
+                        retry(material, sentence)
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    TextEditor(text: $draft)
+                        .font(AppType.studyText)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .frame(minHeight: 130, maxHeight: 260)
+                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(dictationIsFocused ? Color.accentColor : AppPalette.separator,
+                                              lineWidth: dictationIsFocused ? 1.5 : 1)
+                                .allowsHitTesting(false)
+                        }
+                        .focused($dictationIsFocused)
+                        .disabled(sentence.answerRevealed == true)
+                        .accessibilityLabel("西班牙语听写")
+                    HStack {
+                        Text("\(draft.split(whereSeparator: { $0.isWhitespace }).count) 词")
+                            .font(AppType.ui(11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("看答案", systemImage: "eye") {
+                            reveal(material, sentence)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: [.command])
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            HStack {
+                if sentence.answerRevealed != true {
+                    Label("音频 → 听写 → 原句", systemImage: "arrow.right")
+                        .font(AppType.ui(11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("下一句", systemImage: "chevron.right") {
+                    persistDraft()
+                    nextSentence(material, sentence)
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.rightArrow, modifiers: [.command])
+                .disabled(sentence.ordinal >= material.sentences.count)
+            }
+            if let status {
+                Label(status, systemImage: "info.circle")
+                    .font(AppType.ui(12))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func transcriptReviewWorkspace(_ material: AudioMaterial) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label("字幕复核", systemImage: "text.badge.checkmark")
+                            .font(AppType.ui(18, weight: .semibold))
+                        Text(material.title)
+                            .font(AppType.ui(12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        Text(transcriptReviewProgress(material))
+                            .font(AppType.ui(12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if let sentence {
+                        Text(sentenceStateLabel(sentence, isSelected: true))
+                            .font(AppType.ui(11, weight: .medium))
+                            .foregroundStyle(sentenceStateColor(sentence))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(AppPalette.surface, in: Capsule())
+                    }
+                }
+
+                if let sentence {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("句子 \(sentence.ordinal)")
+                            .font(AppType.pageTitle)
+                        Text("of \(material.sentences.count)")
+                            .font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Button {
+                            navigateTranscriptReview(by: -1, in: material)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("上一句")
+                        .accessibilityLabel("上一句")
+                        .disabled(sentence.ordinal <= 1)
+                        Button {
+                            navigateTranscriptReview(by: 1, in: material)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("下一句")
+                        .accessibilityLabel("下一句")
+                        .disabled(sentence.ordinal >= material.sentences.count)
+                        Spacer(minLength: 8)
+                        Text(sentenceStateLabel(sentence, isSelected: true))
+                            .font(AppType.ui(12, weight: .medium))
+                            .foregroundStyle(sentenceStateColor(sentence))
+                    }
+
+                    HStack(spacing: 8) {
+                        Button(playing && playbackSentenceID == sentence.id ? "暂停" :
+                               player != nil && playbackSentenceID == sentence.id ? "继续播放" : "播放本句",
+                               systemImage: playing && playbackSentenceID == sentence.id ? "pause.fill" : "play.fill") {
+                            togglePlayback(material: material, sentence: sentence)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("重听", systemImage: "arrow.clockwise") {
+                            play(material: material, sentence: sentence)
+                        }
+                        .buttonStyle(.bordered)
+                        Button("后退 2 秒", systemImage: "gobackward.2") {
+                            seek(sentence: sentence, by: -2)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(player == nil || playbackSentenceID != sentence.id)
+                        Button("前进 2 秒", systemImage: "goforward.2") {
+                            seek(sentence: sentence, by: 2)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(player == nil || playbackSentenceID != sentence.id)
+                        Spacer(minLength: 0)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("字幕文本")
+                                .font(AppType.ui(13, weight: .semibold))
+                            Spacer()
+                            if hasCurrentTranscriptReviewDraft {
+                                Label("未保存", systemImage: "pencil.circle.fill")
+                                    .font(AppType.ui(11, weight: .medium))
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        TextEditor(text: $reviewText)
+                            .font(AppType.ui(16))
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(minHeight: 150, maxHeight: 230)
+                            .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(AppPalette.separator, lineWidth: 1)
+                                    .allowsHitTesting(false)
+                            }
+                            .accessibilityLabel("字幕文本")
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("起止时间（秒）")
+                            .font(AppType.ui(12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("开始").font(AppType.ui(11)).foregroundStyle(.secondary)
+                                TextField("开始（秒）", text: $reviewStart)
+                                    .studyInputChrome()
+                                    .font(.system(.body, design: .monospaced))
+                                    .accessibilityLabel("开始时间，秒")
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("结束").font(AppType.ui(11)).foregroundStyle(.secondary)
+                                TextField("结束（秒）", text: $reviewEnd)
+                                    .studyInputChrome()
+                                    .font(.system(.body, design: .monospaced))
+                                    .accessibilityLabel("结束时间，秒")
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Button("本机语音复核", systemImage: "waveform") {
+                                recognizeReviewSentence(sentence, material: material)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isReviewSpeechWorking || isReviewAIWorking)
+                            Button("语音 + AI 校对", systemImage: "sparkles") {
+                                proofreadReviewSentence(sentence, material: material, includeSpeech: true)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isReviewAIWorking || isReviewSpeechWorking ||
+                                      reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            if isReviewAIWorking || isReviewSpeechWorking {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                        Text("结合音频确认建议；AI 不会自动覆盖字幕。")
+                            .font(AppType.ui(11))
+                            .foregroundStyle(.secondary)
+                        if let reviewSpeechReference {
+                            LabeledContent("本机识别参考", value: reviewSpeechReference)
+                                .font(AppType.ui(12))
+                                .textSelection(.enabled)
+                        }
+                        if let reviewAISuggestion {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("AI 建议")
+                                    .font(AppType.ui(14, weight: .semibold))
+                                Text(reviewAISuggestion.suggestedText)
+                                    .font(AppType.ui(14))
+                                    .textSelection(.enabled)
+                                Text(reviewAISuggestion.explanation)
+                                    .font(AppType.ui(12))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                Button("采用建议到编辑框") {
+                                    reviewText = reviewAISuggestion.suggestedText
+                                    self.reviewAISuggestion = nil
+                                    reviewStatus = "建议已填入编辑框，请对照音频确认后保存。"
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("保存此句修改", systemImage: "square.and.arrow.down") {
+                            saveTranscriptReview(sentence, material: material)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!hasCurrentTranscriptReviewDraft)
+                        Button("放弃草稿", systemImage: "trash", role: .destructive) {
+                            confirmingReviewDiscard = true
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!hasCurrentTranscriptReviewDraft)
+                        Spacer(minLength: 0)
+                        Menu("切句操作") {
+                            Button("拆成两句…", systemImage: "scissors") {
+                                beginSentenceSplit(sentence, material: material)
+                            }
+                            Button("与下一句合并", systemImage: "arrow.down.to.line") {
+                                mergeWithNextSentence(sentence, material: material)
+                            }
+                            .disabled(sentence.ordinal >= material.sentences.count)
+                        }
+                        .disabled(store.transferInProgress)
+                    }
+
+                    if let reviewStatus {
+                        Label(reviewStatus, systemImage: "info.circle")
+                            .font(AppType.ui(12))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if hasOtherTranscriptReviewDrafts(material) {
+                        Label("其他句子还有未保存校对草稿；逐句保存或放弃后才能完成核对。",
+                              systemImage: "externaldrive")
+                            .font(AppType.ui(12))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if material.transcriptionComplete != true {
+                        Label("请等整段转写完成后再确认核对。",
+                              systemImage: "clock")
+                            .font(AppType.ui(12))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ContentUnavailableView("选择一句核对", systemImage: "text.badge.checkmark",
+                                           description: Text("从左侧 Listening Navigator 选择要检查的字幕和时间。"))
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .confirmationDialog("放弃当前句尚未保存的校对？", isPresented: $confirmingReviewDiscard,
+                            titleVisibility: .visible) {
+            Button("放弃草稿", role: .destructive) {
+                discardTranscriptReviewDraft()
+            }
+            Button("继续校对", role: .cancel) {}
+        }
+        .sheet(item: $reviewSplitTarget) { target in
+            SentenceSplitSheet(sentence: target) { first, second, splitTime in
+                try store.splitSentence(materialID: material.id, sentenceID: target.id,
+                                        firstText: first, secondText: second, at: splitTime)
+                selectedSentenceID = target.id
+                loadTranscriptReviewDraft()
+                reviewStatus = "已拆分，请检查两句的时间。"
+            }
+        }
+    }
+
+    private func preparationState(_ material: AudioMaterial) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if material.sentences.isEmpty {
+                ContentUnavailableView("等待字幕或转写", systemImage: "waveform",
+                                       description: Text("导入 SRT / VTT 字幕，或在上方开始本机转写。"))
+            } else {
+                ContentUnavailableView("先核对字幕与分句", systemImage: "text.badge.checkmark",
+                                       description: Text("检查句子文本和起止时间；确认后开始逐句听写。"))
+                HStack {
+                    Spacer()
+                    Button("核对字幕与分句", systemImage: "text.badge.checkmark") {
+                        enterTranscriptReview()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                }
+            }
+            if let status {
+                Text(status).font(AppType.ui(12)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
+    }
+
+    private func learningInspector(_ material: AudioMaterial) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("学习检查器")
+                    .font(AppType.ui(13, weight: .semibold))
+                    .padding(.top, 16)
+
+                if let sentence, sentence.answerRevealed == true {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Label("理解这句", systemImage: "lightbulb")
+                                .font(AppType.ui(13, weight: .semibold))
+                            Spacer()
+                            if isAnalyzingListening { ProgressView().controlSize(.small) }
+                        }
+                        if let analysis = sentence.analysis {
+                            ListeningAnalysisView(analysis: analysis)
+                            Button("重新分析", systemImage: "arrow.clockwise") {
+                                analyzeListening(material, sentence)
+                            }
+                            .buttonStyle(.link)
+                            .disabled(isAnalyzingListening)
+                        } else {
+                            Text("AI 会结合你的听写和原句说明听辨难点、表达与语法。")
+                                .font(AppType.ui(12))
+                                .foregroundStyle(.secondary)
+                            Button("AI 听力分析", systemImage: "sparkles") {
+                                analyzeListening(material, sentence)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isAnalyzingListening)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("创建卡片")
+                                .font(AppType.ui(13, weight: .semibold))
+                            Spacer()
+                            if isGeneratingCards || isAuditingCards {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                        if let count = sentence.learningPoints?.count, count > 0 {
+                            Label("\(count) 张卡片草稿已保存", systemImage: "checkmark.circle")
+                                .font(AppType.ui(11))
+                                .foregroundStyle(.secondary)
+                        }
+                        Label("积累要点草稿自动保存在本机。", systemImage: "externaldrive")
+                            .font(AppType.ui(11))
+                            .foregroundStyle(.secondary)
+                        LearningPointsEditor(points: Binding(
+                            get: { learningPoints },
+                            set: { points in
+                                learningPoints = points
+                                persistLearningPointsDraft(points)
+                            }
+                        ))
+                        Button("生成卡片草稿", systemImage: "rectangle.stack.badge.plus") {
+                            generateListeningCards(material, sentence)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isGeneratingCards || isAuditingCards)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                } else {
+                    Label("先听写并查看原句", systemImage: "text.quote")
+                        .font(AppType.ui(13, weight: .medium))
+                    Text("完成一次听写后，可在这里查看解释并从当前句子创建卡片。")
+                        .font(AppType.ui(12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 18)
+        }
+        .background(AppPalette.sidebar)
+    }
+
+    private func canDictate(_ material: AudioMaterial) -> Bool {
+        !material.sentences.isEmpty &&
+            material.transcriptionComplete == true &&
+            !material.sentences.contains(where: { $0.status == .generated })
+    }
+
+    private func materialState(_ material: AudioMaterial) -> String {
+        if store.activeTranscriptions.contains(material.id) { return "处理中" }
+        if material.transcriptionComplete == true {
+            return material.sentences.contains(where: { $0.status == .generated }) ? "待核对" : "已核对"
+        }
+        return material.sentences.isEmpty ? "待转写" : "转写未完成"
+    }
+
+    private func sentenceStateColor(_ sentence: ListeningSentence) -> Color {
+        if isReviewingTranscript && hasTranscriptReviewDraft(sentence, materialID: material?.id) {
+            return .orange
+        }
+        if sentence.answerRevealed == true { return .green }
+        if sentence.status == .generated { return .orange }
+        if sentence.status == .verified || sentence.status == .corrected { return .green }
+        return Color.accentColor
+    }
+
+    private func sentenceStateLabel(_ sentence: ListeningSentence, isSelected: Bool = false) -> String {
+        if isReviewingTranscript {
+            if hasTranscriptReviewDraft(sentence, materialID: material?.id) { return "未保存校对" }
+            if isSelected { return "正在核对" }
+            switch sentence.status {
+            case .generated, .pending: return "待核对"
+            case .verified: return "已核对"
+            case .corrected: return "已修正"
+            }
+        }
+        if sentence.answerRevealed == true { return "已完成听写" }
+        if sentence.status == .generated { return "待核对" }
+        return "待练习"
+    }
+
+    private func sentenceStateSymbol(_ sentence: ListeningSentence) -> String {
+        if isReviewingTranscript {
+            if hasTranscriptReviewDraft(sentence, materialID: material?.id) { return "pencil.circle.fill" }
+            switch sentence.status {
+            case .generated, .pending: return "exclamationmark.circle.fill"
+            case .verified: return "checkmark.circle.fill"
+            case .corrected: return "checkmark.seal.fill"
+            }
+        }
+        if sentence.answerRevealed == true { return "checkmark.circle.fill" }
+        if sentence.status == .generated { return "exclamationmark.circle.fill" }
+        return "circle"
+    }
+
+    private func materialStateSymbol(_ material: AudioMaterial) -> String {
+        if store.activeTranscriptions.contains(material.id) { return "arrow.triangle.2.circlepath" }
+        if material.transcriptionComplete == true {
+            return material.sentences.contains(where: { $0.status == .generated })
+                ? "exclamationmark.circle"
+                : "checkmark.circle"
+        }
+        return material.sentences.isEmpty ? "waveform" : "pause.circle"
     }
 
     static func defaultPoints() -> [LearningPointRequest] {
@@ -273,11 +916,30 @@ struct ListeningView: View {
     }
 
     private func loadLearningPoints() {
+        if let key = learningPointsDraftKey,
+           let raw = editingDrafts.draft(for: key),
+           let data = raw.data(using: .utf8),
+           let saved = try? JSONDecoder().decode(ListeningLearningPointsDraft.self, from: data) {
+            learningPoints = saved.points
+            return
+        }
         if let existing = sentence?.learningPoints, !existing.isEmpty {
             learningPoints = existing.map { LearningPointRequest(id: $0.id, category: $0.category, prompt: $0.prompt) }
         } else {
             learningPoints = Self.defaultPoints()
         }
+    }
+
+    private var learningPointsDraftKey: String? {
+        guard let material, let sentence else { return nil }
+        return "listening.points.\(material.id.uuidString).\(sentence.id.uuidString)"
+    }
+
+    private func persistLearningPointsDraft(_ points: [LearningPointRequest]) {
+        guard let key = learningPointsDraftKey,
+              let data = try? JSONEncoder().encode(ListeningLearningPointsDraft(points: points)),
+              let value = String(data: data, encoding: .utf8) else { return }
+        editingDrafts.save(value, for: key)
     }
 
     private func analyzeListening(_ material: AudioMaterial, _ sentence: ListeningSentence) {
@@ -317,6 +979,7 @@ struct ListeningView: View {
             status = "请先填写至少一个积累要点。"
             return
         }
+        let submittedPointsDraftKey = "listening.points.\(material.id.uuidString).\(sentence.id.uuidString)"
         isGeneratingCards = true
         status = "AI 正在生成卡片草稿…"
         Task {
@@ -341,6 +1004,7 @@ struct ListeningView: View {
                 let auditedResult = ListeningCardsResult(cards: auditedCards)
                 try store.saveListeningCards(materialID: material.id, sentenceID: sentence.id,
                                              points: filled, result: auditedResult)
+                editingDrafts.removeDraft(for: submittedPointsDraftKey)
                 status = fallbackCount == 0
                     ? "\(filled.count) 张卡片草稿已保存。"
                     : "\(filled.count) 张卡片草稿已保存。\(fallbackCount) 张使用基础整理版本；可在卡片详情中重新整理。"
@@ -399,12 +1063,7 @@ struct ListeningView: View {
                 ? "用字幕重新校准"
                 : store.whisperModelInstalled ? "字幕 + 本机音频校准" : "准备本地转写模型")
             : (store.whisperModelInstalled ? "本机转写" : "准备本地转写模型")
-        return HStack(spacing: 12) {
-            Button(playing && playbackSentenceID == nil ? "暂停整段" :
-                   player != nil && playbackSentenceID == nil ? "继续整段" : "整段播放",
-                   systemImage: playing && playbackSentenceID == nil ? "pause.fill" : "play.circle") {
-                togglePlayback(material: material, sentence: nil)
-            }
+        return HStack(spacing: 8) {
             if material.segmentationSource == .subtitle {
                 Label("旧版字幕切片（未迁移）", systemImage: "captions.bubble")
                     .font(AppType.ui(13, weight: .medium))
@@ -472,7 +1131,6 @@ struct ListeningView: View {
             status = material.transcriptionComplete == true
                 ? "字幕已保存；点击“用字幕重新校准”以字幕 cue 生成练习句。"
                 : "字幕已保存；点击“字幕 + 本机音频校准”生成字幕句子并局部校准时间。"
-            showReview = false
         } catch { status = error.localizedDescription }
     }
 
@@ -550,21 +1208,35 @@ struct ListeningView: View {
         playing = false
     }
 
-    private func loadDraft() { draft = sentence?.draftText ?? "" }
+    private func loadDraft() {
+        isLoadingDraft = true
+        draftMaterialID = material?.id
+        draftSentenceID = sentence?.id
+        draft = sentence?.draftText ?? ""
+        isLoadingDraft = false
+    }
+
     private func scheduleDraftSave() {
         draftSaveTask?.cancel()
-        guard let material, let sentence, sentence.answerRevealed != true else { return }
+        guard let materialID = draftMaterialID, let sentenceID = draftSentenceID,
+              let sentence = store.data.audioMaterials.first(where: { $0.id == materialID })?
+                .sentences.first(where: { $0.id == sentenceID }),
+              sentence.answerRevealed != true else { return }
         let value = draft
         draftSaveTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
-            try? store.saveDictationDraft(materialID: material.id, sentenceID: sentence.id, text: value)
+            try? store.saveDictationDraft(materialID: materialID, sentenceID: sentenceID, text: value)
         }
     }
+
     private func persistDraft() {
         draftSaveTask?.cancel()
-        guard let material, let sentence, sentence.answerRevealed != true else { return }
-        try? store.saveDictationDraft(materialID: material.id, sentenceID: sentence.id, text: draft)
+        guard let materialID = draftMaterialID, let sentenceID = draftSentenceID,
+              let sentence = store.data.audioMaterials.first(where: { $0.id == materialID })?
+                .sentences.first(where: { $0.id == sentenceID }),
+              sentence.answerRevealed != true else { return }
+        try? store.saveDictationDraft(materialID: materialID, sentenceID: sentenceID, text: draft)
     }
     private func reveal(_ material: AudioMaterial, _ sentence: ListeningSentence) {
         draftSaveTask?.cancel()
@@ -587,19 +1259,276 @@ struct ListeningView: View {
         selectedSentenceID = next.id
     }
 
+    private var hasCurrentTranscriptReviewDraft: Bool {
+        guard let materialID = reviewMaterialID, let sentenceID = reviewSentenceID,
+              let sentence = store.data.audioMaterials.first(where: { $0.id == materialID })?
+                .sentences.first(where: { $0.id == sentenceID }) else { return false }
+        return reviewText != sentence.transcript ||
+            reviewStart != String(format: "%.2f", sentence.startSeconds) ||
+            reviewEnd != String(format: "%.2f", sentence.endSeconds)
+    }
+
+    private func transcriptReviewDraftPrefix(materialID: UUID, sentenceID: UUID) -> String {
+        "transcript.\(materialID.uuidString).\(sentenceID.uuidString)."
+    }
+
+    private func hasTranscriptReviewDraft(_ sentence: ListeningSentence, materialID: UUID?) -> Bool {
+        guard let materialID else { return false }
+        let prefix = transcriptReviewDraftPrefix(materialID: materialID, sentenceID: sentence.id)
+        let text = editingDrafts.draft(for: prefix + "text")
+        let start = editingDrafts.draft(for: prefix + "start")
+        let end = editingDrafts.draft(for: prefix + "end")
+        return (text != nil && text != sentence.transcript) ||
+            (start != nil && start != String(format: "%.2f", sentence.startSeconds)) ||
+            (end != nil && end != String(format: "%.2f", sentence.endSeconds))
+    }
+
+    private func hasOtherTranscriptReviewDrafts(_ material: AudioMaterial) -> Bool {
+        material.sentences.contains { item in
+            item.id != reviewSentenceID && hasTranscriptReviewDraft(item, materialID: material.id)
+        }
+    }
+
+    private func transcriptReviewProgress(_ material: AudioMaterial) -> String {
+        let pending = material.sentences.filter { $0.status == .generated || $0.status == .pending }.count
+        let reviewed = material.sentences.count - pending
+        return "\(reviewed) / \(material.sentences.count) 句已核对 · \(pending) 句待核对"
+    }
+
+    private func reviewCompletionHelp(_ material: AudioMaterial) -> String {
+        if material.transcriptionComplete != true { return "请等整段转写完成后再确认核对。" }
+        if hasOtherTranscriptReviewDrafts(material) {
+            return "请先逐句保存或放弃其他未保存的校对草稿。"
+        }
+        return "保存当前修改并完成字幕核对。"
+    }
+
+    private func enterTranscriptReview() {
+        persistDraft()
+        isReviewingTranscript = true
+        reviewStatus = nil
+        loadTranscriptReviewDraft()
+    }
+
+    private func exitTranscriptReview() {
+        let hasDraft = hasCurrentTranscriptReviewDraft
+        persistTranscriptReviewDraft()
+        stopAudio()
+        isReviewingTranscript = false
+        status = hasDraft ? "未保存的字幕校对草稿已保留，可稍后继续复核。" : nil
+    }
+
+    private func loadTranscriptReviewDraft() {
+        guard let material, let sentence else {
+            reviewMaterialID = nil
+            reviewSentenceID = nil
+            reviewText = ""
+            reviewStart = ""
+            reviewEnd = ""
+            reviewAISuggestion = nil
+            reviewSpeechReference = nil
+            return
+        }
+        let prefix = transcriptReviewDraftPrefix(materialID: material.id, sentenceID: sentence.id)
+        reviewMaterialID = material.id
+        reviewSentenceID = sentence.id
+        reviewText = editingDrafts.draft(for: prefix + "text") ?? sentence.transcript
+        reviewStart = editingDrafts.draft(for: prefix + "start") ??
+            String(format: "%.2f", sentence.startSeconds)
+        reviewEnd = editingDrafts.draft(for: prefix + "end") ??
+            String(format: "%.2f", sentence.endSeconds)
+        reviewAISuggestion = nil
+        reviewSpeechReference = nil
+    }
+
+    private func persistTranscriptReviewDraft() {
+        guard let materialID = reviewMaterialID, let sentenceID = reviewSentenceID,
+              store.data.audioMaterials.first(where: { $0.id == materialID })?
+                .sentences.contains(where: { $0.id == sentenceID }) == true else { return }
+        let prefix = transcriptReviewDraftPrefix(materialID: materialID, sentenceID: sentenceID)
+        guard hasCurrentTranscriptReviewDraft else {
+            editingDrafts.removeDrafts(withPrefix: prefix)
+            return
+        }
+        editingDrafts.save(reviewText, for: prefix + "text")
+        editingDrafts.save(reviewStart, for: prefix + "start")
+        editingDrafts.save(reviewEnd, for: prefix + "end")
+    }
+
+    private func saveTranscriptReview(_ sentence: ListeningSentence, material: AudioMaterial) {
+        do {
+            try commitTranscriptReview(sentence, material: material)
+            reviewStatus = "已保存。"
+        } catch {
+            reviewStatus = error.localizedDescription
+        }
+    }
+
+    private func commitTranscriptReview(_ sentence: ListeningSentence, material: AudioMaterial) throws {
+        guard hasCurrentTranscriptReviewDraft else { return }
+        try store.updateSentence(materialID: material.id, sentenceID: sentence.id,
+                                 text: reviewText, start: Double(reviewStart) ?? -1,
+                                 end: Double(reviewEnd) ?? -1)
+        editingDrafts.removeDrafts(withPrefix:
+            transcriptReviewDraftPrefix(materialID: material.id, sentenceID: sentence.id))
+        loadTranscriptReviewDraft()
+    }
+
+    private func discardTranscriptReviewDraft() {
+        guard let materialID = reviewMaterialID, let sentenceID = reviewSentenceID else { return }
+        editingDrafts.removeDrafts(withPrefix:
+            transcriptReviewDraftPrefix(materialID: materialID, sentenceID: sentenceID))
+        loadTranscriptReviewDraft()
+        reviewStatus = "已放弃校对草稿；原字幕内容未更改。"
+    }
+
+    private func completeTranscriptReview(_ material: AudioMaterial) {
+        guard let sentence else { return }
+        do {
+            try commitTranscriptReview(sentence, material: material)
+            let unresolvedCount = material.sentences.filter {
+                $0.id != sentence.id && hasTranscriptReviewDraft($0, materialID: material.id)
+            }.count
+            guard unresolvedCount == 0 else {
+                reviewStatus = "还有 \(unresolvedCount) 句存在未保存校对；请逐句保存或放弃后再完成。"
+                return
+            }
+            try store.verifyTranscript(materialID: material.id)
+            stopAudio()
+            isReviewingTranscript = false
+            reviewStatus = nil
+            status = "字幕核对完成，可以开始逐句听写。"
+        } catch {
+            reviewStatus = error.localizedDescription
+        }
+    }
+
+    private func beginSentenceSplit(_ sentence: ListeningSentence, material: AudioMaterial) {
+        do {
+            try commitTranscriptReview(sentence, material: material)
+            guard let updated = store.data.audioMaterials.first(where: { $0.id == material.id })?
+                .sentences.first(where: { $0.id == sentence.id }) else {
+                throw StoreError.missingSentence
+            }
+            reviewSplitTarget = updated
+            reviewStatus = nil
+        } catch {
+            reviewStatus = error.localizedDescription
+        }
+    }
+
+    private func navigateTranscriptReview(by offset: Int, in material: AudioMaterial) {
+        guard let sentence,
+              let next = material.sentences.first(where: { $0.ordinal == sentence.ordinal + offset }) else { return }
+        selectedSentenceID = next.id
+    }
+
+    private func mergeWithNextSentence(_ sentence: ListeningSentence, material: AudioMaterial) {
+        do {
+            try commitTranscriptReview(sentence, material: material)
+            guard let next = material.sentences.first(where: { $0.ordinal == sentence.ordinal + 1 }) else {
+                throw StoreError.missingSentence
+            }
+            guard !hasTranscriptReviewDraft(next, materialID: material.id) else {
+                reviewStatus = "下一句有未保存校对；请先选择该句并保存或放弃草稿，再合并。"
+                return
+            }
+            try store.mergeWithNext(materialID: material.id, sentenceID: sentence.id)
+            editingDrafts.removeDrafts(withPrefix:
+                transcriptReviewDraftPrefix(materialID: material.id, sentenceID: next.id))
+            selectedSentenceID = sentence.id
+            loadTranscriptReviewDraft()
+            reviewStatus = "已合并；当前选择保留在合并后的句子。"
+        } catch {
+            reviewStatus = error.localizedDescription
+        }
+    }
+
+    private func recognizeReviewSentence(_ sentence: ListeningSentence, material: AudioMaterial) {
+        let sentenceID = sentence.id
+        let materialID = material.id
+        isReviewSpeechWorking = true
+        reviewSpeechReference = nil
+        reviewStatus = "正在识别这句音频…"
+        Task {
+            do {
+                let result = try await TranscriptionService.recognizeSentence(
+                    audioURL: store.audioURL(for: material),
+                    start: sentence.startSeconds,
+                    end: sentence.endSeconds
+                )
+                if selectedID == materialID, selectedSentenceID == sentenceID {
+                    reviewSpeechReference = result
+                    reviewStatus = "已取得本机识别参考；可再用 AI 对照校对。"
+                }
+            } catch {
+                if selectedID == materialID, selectedSentenceID == sentenceID {
+                    reviewStatus = error.localizedDescription
+                }
+            }
+            isReviewSpeechWorking = false
+        }
+    }
+
+    private func proofreadReviewSentence(_ sentence: ListeningSentence, material: AudioMaterial,
+                                        includeSpeech: Bool) {
+        let key: String
+        do { key = try AIProviderSettings.textKey() ?? "" }
+        catch { reviewStatus = error.localizedDescription; return }
+        guard !key.isEmpty else { reviewStatus = AIProviderError.missingKey.localizedDescription; return }
+        let source = reviewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentenceID = sentence.id
+        let materialID = material.id
+        isReviewAIWorking = true
+        reviewAISuggestion = nil
+        reviewStatus = "正在复核音频并校对字幕…"
+        Task {
+            do {
+                let reference: String?
+                if includeSpeech {
+                    reference = try await TranscriptionService.recognizeSentence(
+                        audioURL: store.audioURL(for: material),
+                        start: sentence.startSeconds,
+                        end: sentence.endSeconds
+                    )
+                    if selectedID == materialID, selectedSentenceID == sentenceID {
+                        reviewSpeechReference = reference
+                    }
+                } else {
+                    reference = reviewSpeechReference
+                }
+                let result = try await AIStudyService.proofreadTranscript(
+                    source, speechRecognition: reference, apiKey: key
+                )
+                guard selectedID == materialID, selectedSentenceID == sentenceID,
+                      reviewText.trimmingCharacters(in: .whitespacesAndNewlines) == source else {
+                    isReviewAIWorking = false
+                    if selectedID == materialID, selectedSentenceID == sentenceID {
+                        reviewStatus = "文字已变化，请重新校对当前句。"
+                    }
+                    return
+                }
+                reviewAISuggestion = result
+                reviewStatus = "校对建议已生成；请结合音频检查。"
+            } catch {
+                if selectedID == materialID, selectedSentenceID == sentenceID {
+                    reviewStatus = error.localizedDescription
+                }
+            }
+            isReviewAIWorking = false
+        }
+    }
+
 }
 
 private struct ListeningAnalysisView: View {
     let analysis: ListeningAnalysis
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("AI 听力分析")
-                .font(AppType.ui(14, weight: .semibold))
-
+        VStack(alignment: .leading, spacing: 12) {
             ListeningAnalysisSummaryCard(explanation: analysis.explanation)
-
-            VStack(alignment: .leading, spacing: 14) {
+            if !(analysis.items ?? []).isEmpty {
+                Divider()
                 ForEach(analysis.items ?? []) { item in
                     ListeningAnalysisItemCard(item: item)
                 }
@@ -618,17 +1547,12 @@ private struct ListeningAnalysisSummaryCard: View {
                 .font(AppType.ui(13, weight: .semibold))
                 .foregroundStyle(GlassTheme.cyan)
             Text(explanation)
-                .font(AppType.ui(16))
+                .font(AppType.ui(14))
                 .lineSpacing(4)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.cyan.opacity(0.20), lineWidth: 1)
-        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -640,7 +1564,7 @@ private struct ListeningAnalysisItemCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 7) {
             Text(categoryTitle)
                 .font(AppType.ui(12, weight: .semibold))
                 .foregroundStyle(isAttemptDifference ? .orange : GlassTheme.cyan)
@@ -664,7 +1588,6 @@ private struct ListeningAnalysisItemCard: View {
             if let evidence = item.evidence?.trimmingCharacters(in: .whitespacesAndNewlines),
                !evidence.isEmpty {
                 Divider()
-                    .overlay(.white.opacity(0.14))
                 VStack(alignment: .leading, spacing: 4) {
                     Text("依据")
                         .font(AppType.ui(11, weight: .semibold))
@@ -681,18 +1604,7 @@ private struct ListeningAnalysisItemCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(
-            isAttemptDifference ? Color.orange.opacity(0.07) : Color.white.opacity(0.07),
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(
-                    isAttemptDifference ? Color.orange.opacity(0.20) : Color.white.opacity(0.13),
-                    lineWidth: 1
-                )
-        }
+        .padding(.vertical, 7)
     }
 
     private var categoryTitle: String {
@@ -712,39 +1624,44 @@ private struct LearningPointsEditor: View {
     @Binding var points: [LearningPointRequest]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("这句值得积累什么？").font(AppType.ui(14, weight: .semibold))
-            Text("每个已填写的要点会分别生成一张草稿；空白项会被忽略。")
-                .font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("积累要点")
+                .font(AppType.ui(12, weight: .semibold))
+            Text("每条已填写的要点各生成一张卡片草稿。")
+                .font(AppType.ui(11))
+                .foregroundStyle(.secondary)
             ForEach($points) { $point in
-                HStack(alignment: .center, spacing: 10) {
-                    Picker("分类", selection: $point.category) {
-                        ForEach(CardCategory.allCases) { category in Text(category.rawValue).tag(category) }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Picker("分类", selection: $point.category) {
+                            ForEach(CardCategory.allCases) { category in
+                                Text(category.rawValue).tag(category)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        Spacer()
+                        Button(role: .destructive) {
+                            points.removeAll { $0.id == point.id }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("移除此要点")
                     }
-                    .labelsHidden()
-                    .studyPickerChrome()
-                    .frame(width: 150, alignment: .leading)
                     TextField(placeholder(for: point.category), text: $point.prompt, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(role: .destructive) {
-                        points.removeAll { $0.id == point.id }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: 32)
+                        .lineLimit(2...4)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
             }
             Button("新增要点", systemImage: "plus") {
                 points.append(LearningPointRequest(id: UUID(), category: .expression, prompt: ""))
             }
             .buttonStyle(.borderless)
         }
-        .padding(16)
-        .background(Color.green.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func placeholder(for category: CardCategory) -> String {
@@ -755,275 +1672,6 @@ private struct LearningPointsEditor: View {
         case .knowledge: "例如：墨西哥常见的辣椒有什么区别？"
         case .correction: "记录需要专门纠正的表达"
         }
-    }
-}
-
-struct TranscriptReviewSheet: View {
-    @EnvironmentObject private var store: StudyStore
-    @Environment(\.dismiss) private var dismiss
-    let materialID: UUID
-    @State private var selectedID: UUID?
-    @State private var text = ""
-    @State private var start = ""
-    @State private var end = ""
-    @State private var status: String?
-    @State private var reviewPlayer: AVAudioPlayer?
-    @State private var reviewPlaying = false
-    @State private var playbackID = UUID()
-    @State private var splitTarget: ListeningSentence?
-    @State private var aiSuggestion: TranscriptProofreadingResult?
-    @State private var aiWorking = false
-    @State private var speechWorking = false
-    @State private var speechReference: String?
-
-    private var material: AudioMaterial? { store.data.audioMaterials.first(where: { $0.id == materialID }) }
-    private var selected: ListeningSentence? { material?.sentences.first(where: { $0.id == selectedID }) ?? material?.sentences.first }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            List(selection: $selectedID) {
-                ForEach(material?.sentences ?? []) { sentence in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("第 \(sentence.ordinal) 句").font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary)
-                        Text(sentence.transcript).lineLimit(2)
-                    }
-                    .tag(sentence.id)
-                }
-            }
-            .frame(width: 260)
-            Divider()
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text("核对转写").font(AppType.ui(22, weight: .semibold))
-                    Spacer()
-                    Button("关闭") { dismiss() }
-                }
-                Text("转写可能有误，请对照音频修正文字和起止时间。修改会保留原句 ID。")
-                    .foregroundStyle(.secondary)
-                if let selected {
-                    HStack {
-                        Text("第 \(selected.ordinal) 句").font(AppType.ui(17, weight: .semibold))
-                        Spacer()
-                        Button(reviewPlaying ? "暂停" : reviewPlayer == nil ? "播放本句" : "继续播放",
-                               systemImage: reviewPlaying ? "pause.fill" : "play.fill") { togglePlayback(selected) }
-                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                        Button("后退 2 秒", systemImage: "gobackward.2") { seek(selected, by: -2) }
-                            .disabled(reviewPlayer == nil)
-                        Button("前进 2 秒", systemImage: "goforward.2") { seek(selected, by: 2) }
-                            .disabled(reviewPlayer == nil)
-                    }
-                    TextEditor(text: $text)
-                        .font(AppType.ui(17))
-                        .frame(height: 120)
-                        .studyInputChrome()
-                    HStack(spacing: 12) {
-                        Button("本机语音复核", systemImage: "waveform") { recognize(selected) }
-                            .buttonStyle(AppActionButtonStyle())
-                            .disabled(speechWorking || aiWorking)
-                        Button("语音 + AI 校对", systemImage: "sparkles") { proofread(selected, includeSpeech: true) }
-                            .buttonStyle(AppActionButtonStyle())
-                            .disabled(aiWorking || speechWorking || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if aiWorking || speechWorking { ProgressView().controlSize(.small) }
-                    }
-                    if let speechReference {
-                        Text("本机识别参考：\(speechReference)")
-                            .font(AppType.ui(13)).textSelection(.enabled)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("结合音频确认建议；AI 不会自动覆盖字幕。")
-                            .font(AppType.ui(12)).foregroundStyle(.secondary)
-                    }
-                    if let aiSuggestion {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("AI 建议").font(AppType.ui(15, weight: .semibold))
-                            Text(aiSuggestion.suggestedText).textSelection(.enabled)
-                            Text(aiSuggestion.explanation)
-                                .font(AppType.ui(13)).foregroundStyle(.secondary)
-                            Button("采用建议到编辑框") {
-                                text = aiSuggestion.suggestedText
-                                self.aiSuggestion = nil
-                                status = "建议已填入编辑框，请对照音频确认后保存。"
-                            }
-                            .buttonStyle(AppActionButtonStyle(prominent: true))
-                        }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                    }
-                    HStack {
-                        TextField("开始（秒）", text: $start)
-                            .studyInputChrome()
-                        TextField("结束（秒）", text: $end)
-                            .studyInputChrome()
-                    }
-                    HStack {
-                        Button("保存这句修改") {
-                            do {
-                                try store.updateSentence(materialID: materialID, sentenceID: selected.id,
-                                                         text: text, start: Double(start) ?? -1, end: Double(end) ?? -1)
-                                status = "已保存。"
-                            } catch { status = error.localizedDescription }
-                        }
-                        .buttonStyle(AppActionButtonStyle(prominent: true))
-                        Menu("切句操作") {
-                            Button("拆成两句…") { splitTarget = selected }
-                            Button("与下一句合并") {
-                                do {
-                                    try store.mergeWithNext(materialID: materialID, sentenceID: selected.id)
-                                    loadSelected()
-                                    status = "已合并。"
-                                } catch { status = error.localizedDescription }
-                            }
-                            .disabled(selected.ordinal >= (material?.sentences.count ?? 0))
-                        }
-                    }
-                }
-                Spacer()
-                if let status { Text(status).font(AppType.ui(12, weight: .regular)).foregroundStyle(.secondary) }
-                HStack {
-                    Spacer()
-                    Button("完成准备，开始逐句听写") {
-                        do { try store.verifyTranscript(materialID: materialID); dismiss() }
-                        catch { status = error.localizedDescription }
-                    }
-                    .buttonStyle(AppActionButtonStyle(prominent: true))
-                    .disabled(material?.transcriptionComplete != true)
-                }
-            }
-            .padding(24)
-        }
-        .frame(width: 850, height: 560)
-        .onAppear { selectedID = material?.sentences.first?.id; loadSelected() }
-        .onChange(of: selectedID) { _, _ in stopAudio(); loadSelected() }
-        .onDisappear { stopAudio() }
-        .sheet(item: $splitTarget) { target in
-            SentenceSplitSheet(sentence: target) { first, second, splitTime in
-                try store.splitSentence(materialID: materialID, sentenceID: target.id,
-                                        firstText: first, secondText: second, at: splitTime)
-                loadSelected()
-                status = "已拆分，请检查两句的时间。"
-            }
-        }
-    }
-
-    private func recognize(_ sentence: ListeningSentence) {
-        guard let material else { return }
-        let sentenceID = sentence.id
-        speechWorking = true
-        speechReference = nil
-        status = "正在识别这句音频…"
-        Task {
-            do {
-                let result = try await TranscriptionService.recognizeSentence(
-                    audioURL: store.audioURL(for: material), start: sentence.startSeconds, end: sentence.endSeconds)
-                if selected?.id == sentenceID {
-                    speechReference = result
-                    status = "已取得本机识别参考；可再用 DeepSeek 对照校对。"
-                }
-            } catch { status = error.localizedDescription }
-            speechWorking = false
-        }
-    }
-
-    private func proofread(_ sentence: ListeningSentence, includeSpeech: Bool) {
-        let key: String
-        do { key = try AIProviderSettings.textKey() ?? "" }
-        catch { status = error.localizedDescription; return }
-        guard !key.isEmpty else { status = AIProviderError.missingKey.localizedDescription; return }
-        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sentenceID = sentence.id
-        aiWorking = true
-        aiSuggestion = nil
-        status = "正在复核音频并校对字幕…"
-        Task {
-            do {
-                let reference: String?
-                if includeSpeech {
-                    guard let material else { aiWorking = false; return }
-                    reference = try await TranscriptionService.recognizeSentence(
-                        audioURL: store.audioURL(for: material), start: sentence.startSeconds, end: sentence.endSeconds)
-                    if selected?.id == sentenceID { speechReference = reference }
-                } else {
-                    reference = speechReference
-                }
-                let result = try await AIStudyService.proofreadTranscript(source, speechRecognition: reference, apiKey: key)
-                guard selected?.id == sentenceID, text.trimmingCharacters(in: .whitespacesAndNewlines) == source else {
-                    aiWorking = false
-                    status = "文字已变化，请重新校对当前句。"
-                    return
-                }
-                aiSuggestion = result
-                status = "校对建议已生成；请结合音频检查。"
-            } catch {
-                status = error.localizedDescription
-            }
-            aiWorking = false
-        }
-    }
-
-    private func togglePlayback(_ sentence: ListeningSentence) {
-        if let reviewPlayer {
-            if reviewPlaying {
-                playbackID = UUID()
-                reviewPlayer.pause()
-                reviewPlaying = false
-            } else {
-                reviewPlayer.play()
-                reviewPlaying = true
-                schedulePlaybackEnd(sentence)
-            }
-        } else {
-            play(sentence)
-        }
-    }
-
-    private func play(_ sentence: ListeningSentence) {
-        stopAudio()
-        guard let material else { return }
-        do {
-            let current = try AVAudioPlayer(contentsOf: store.audioURL(for: material))
-            current.currentTime = sentence.startSeconds
-            current.play()
-            reviewPlayer = current
-            reviewPlaying = true
-            schedulePlaybackEnd(sentence)
-        } catch { status = error.localizedDescription }
-    }
-
-    private func seek(_ sentence: ListeningSentence, by seconds: Double) {
-        guard let reviewPlayer else { return }
-        playbackID = UUID()
-        let upper = min(sentence.endSeconds, reviewPlayer.duration)
-        reviewPlayer.currentTime = min(max(reviewPlayer.currentTime + seconds, sentence.startSeconds),
-                                       max(sentence.startSeconds, upper - 0.05))
-        if reviewPlaying { schedulePlaybackEnd(sentence) }
-    }
-
-    private func schedulePlaybackEnd(_ sentence: ListeningSentence) {
-        guard let reviewPlayer, reviewPlaying else { return }
-        let token = UUID()
-        playbackID = token
-        let remaining = max(0.05, min(sentence.endSeconds, reviewPlayer.duration) - reviewPlayer.currentTime)
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(Int(remaining * 1000)))
-            if playbackID == token { stopAudio() }
-        }
-    }
-
-    private func stopAudio() {
-        playbackID = UUID()
-        reviewPlayer?.stop()
-        reviewPlayer = nil
-        reviewPlaying = false
-    }
-
-    private func loadSelected() {
-        text = selected?.transcript ?? ""
-        aiSuggestion = nil
-        speechReference = nil
-        start = selected.map { String(format: "%.2f", $0.startSeconds) } ?? ""
-        end = selected.map { String(format: "%.2f", $0.endSeconds) } ?? ""
     }
 }
 
@@ -1062,6 +1710,7 @@ private struct SentenceSplitSheet: View {
         }
         .padding(26)
         .frame(width: 540)
+        .interactiveDismissDisabled(true)
         .onAppear {
             first = sentence.transcript
             splitTime = String(format: "%.2f", (sentence.startSeconds + sentence.endSeconds) / 2)
@@ -1097,6 +1746,7 @@ private struct PasteSubtitleSheet: View {
         }
         .padding(24)
         .frame(width: 560)
+        .interactiveDismissDisabled(!text.isEmpty)
     }
 
     private func importPasted() {

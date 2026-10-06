@@ -30,6 +30,7 @@ private struct WritingFeedbackDisplay {
 
 struct WritingView: View {
     @EnvironmentObject private var store: StudyStore
+    @EnvironmentObject private var editingDrafts: EditingDraftStore
     @Binding var selectedExerciseID: UUID?
     @State private var mode: WritingMode = .material
     @State private var sourceKind: WritingSourceKind = .reading
@@ -81,30 +82,36 @@ struct WritingView: View {
                         .foregroundStyle(GlassTheme.cyan)
                     Text("把听过、读过的，写成自己的西语。")
                         .font(AppType.ui(32, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.94))
+                        .foregroundStyle(AppPalette.ink)
+                    Label("输入草稿会自动保存在本机；提交后才写入练习记录。", systemImage: "externaldrive")
+                        .font(AppType.ui(12))
+                        .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 10) {
                     ForEach(WritingMode.allCases) { option in
                         Button {
                             guard option != mode else { return }
+                            saveCurrentWritingDraft()
                             mode = option
                             resetForModeChange()
+                            restoreCurrentWritingDraft()
                         } label: {
                             Text(option.rawValue)
                                 .font(AppType.ui(15, weight: .semibold))
                                 .frame(maxWidth: .infinity, minHeight: 46)
-                                .foregroundStyle(.white)
-                                .background(mode == option ? .white.opacity(0.22) : .white.opacity(0.07),
+                                .foregroundStyle(AppPalette.ink)
+                                .foregroundStyle(mode == option ? Color.accentColor : AppPalette.secondaryInk)
+                                .background(mode == option ? AppPalette.selected : AppPalette.surface,
                                             in: RoundedRectangle(cornerRadius: 22))
                                 .overlay(RoundedRectangle(cornerRadius: 22)
-                                    .strokeBorder(.white.opacity(mode == option ? 0.40 : 0.14))
+                                    .strokeBorder(mode == option ? Color.accentColor.opacity(0.45) : AppPalette.separator)
                                     .allowsHitTesting(false))
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(8)
-                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 28))
+                .background(AppPalette.sidebar, in: RoundedRectangle(cornerRadius: 12))
 
                 VStack(alignment: .leading, spacing: 16) {
                     preparationPanel
@@ -120,10 +127,14 @@ struct WritingView: View {
         .onAppear { prepareInitialState() }
         .onChange(of: selectedExerciseID) { _, _ in loadSelectedExercise() }
         .onChange(of: chinesePrompt) { _, newValue in
+            saveCurrentWritingDraft()
             if let chineseReview, newValue != reviewedChinese && newValue != chineseReview.revisedChinese {
                 self.chineseReview = nil
             }
         }
+        .onChange(of: learnerSpanish) { _, _ in saveCurrentWritingDraft() }
+        .onChange(of: referenceSpanish) { _, _ in saveCurrentWritingDraft() }
+        .onChange(of: focus) { _, _ in saveCurrentWritingDraft() }
     }
 
     @ViewBuilder private var preparationPanel: some View {
@@ -134,23 +145,26 @@ struct WritingView: View {
                         ForEach(WritingSourceKind.allCases) { kind in
                             Button {
                                 guard kind != sourceKind else { return }
+                                saveCurrentWritingDraft()
                                 sourceKind = kind
-                                changeSource(to: allSources.first(where: { $0.kind == kind })?.segmentID)
+                                changeSource(to: allSources.first(where: { $0.kind == kind })?.segmentID,
+                                            savePreviousDraft: false)
                             } label: {
                                 Label(kind.rawValue, systemImage: kind == .listening ? "waveform" : "book.closed")
                                     .font(AppType.ui(14, weight: .semibold))
                                     .frame(maxWidth: .infinity, minHeight: 42)
-                                    .background(sourceKind == kind ? Color.accentColor.opacity(0.22) : Color.white.opacity(0.07),
+                                    .foregroundStyle(sourceKind == kind ? Color.accentColor : AppPalette.secondaryInk)
+                                    .background(sourceKind == kind ? AppPalette.selected : AppPalette.surface,
                                                 in: RoundedRectangle(cornerRadius: 12))
                                     .overlay(RoundedRectangle(cornerRadius: 12)
-                                        .strokeBorder(.white.opacity(sourceKind == kind ? 0.38 : 0.14))
+                                        .strokeBorder(sourceKind == kind ? Color.accentColor.opacity(0.45) : AppPalette.separator)
                                         .allowsHitTesting(false))
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .padding(6)
-                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16))
+                    .background(AppPalette.sidebar, in: RoundedRectangle(cornerRadius: 10))
                     if visibleSources.isEmpty {
                         ContentUnavailableView(sourceKind == .reading ? "还没有阅读材料" : "还没有听力句子",
                                                systemImage: sourceKind == .reading ? "text.book.closed" : "waveform",
@@ -170,7 +184,7 @@ struct WritingView: View {
                                     Spacer(minLength: 0)
                                     Image(systemName: "chevron.down")
                                         .font(AppType.ui(13, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(0.86))
+                                        .foregroundStyle(AppPalette.secondaryInk)
                                 }
                             }
                             .menuIndicator(.hidden)
@@ -216,10 +230,10 @@ struct WritingView: View {
                             }
                         }
                         .font(AppType.ui(14))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(AppPalette.ink)
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22))
+                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10))
                     }
                 }
                 if working { ProgressView().controlSize(.small) }
@@ -279,7 +293,7 @@ struct WritingView: View {
                 .foregroundStyle(.secondary)
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 Divider()
                 Text("你的西语").font(AppType.ui(17, weight: .semibold))
@@ -346,10 +360,14 @@ struct WritingView: View {
         if selectedExerciseID != nil { loadSelectedExercise(); return }
         if store.data.articles.isEmpty && !store.data.audioMaterials.isEmpty { sourceKind = .listening }
         selectedSegmentID = visibleSources.first?.segmentID
+        restoreCurrentWritingDraft()
     }
 
     private func loadSelectedExercise() {
-        guard let exercise = currentExercise else { return }
+        guard let exercise = currentExercise else {
+            restoreCurrentWritingDraft()
+            return
+        }
         mode = exercise.mode ?? .material
         chinesePrompt = exercise.chinesePrompt
         chineseReview = nil
@@ -365,10 +383,12 @@ struct WritingView: View {
             sourceKind = .listening
         } else if exercise.sourceID != nil { sourceKind = .reading }
         if let latest = exercise.versions.last { feedback = display(latest) }
+        restoreCurrentWritingDraft()
         notice = "已载入这道练习，可以在原稿上继续修改并提交新版本。"
     }
 
-    private func changeSource(to segmentID: UUID?) {
+    private func changeSource(to segmentID: UUID?, savePreviousDraft: Bool = true) {
+        if savePreviousDraft { saveCurrentWritingDraft() }
         selectedSegmentID = segmentID
         selectedExerciseID = nil
         chinesePrompt = ""
@@ -382,6 +402,7 @@ struct WritingView: View {
         learnerSpanish = ""
         feedback = nil
         notice = nil
+        restoreCurrentWritingDraft()
     }
 
     private func resetForModeChange() {
@@ -398,6 +419,38 @@ struct WritingView: View {
         feedback = nil
         notice = nil
         if mode == .material { selectedSegmentID = visibleSources.first?.segmentID }
+    }
+
+    private var currentWritingDraftPrefix: String {
+        if let selectedExerciseID { return "writing.exercise.\(selectedExerciseID.uuidString)." }
+        switch mode {
+        case .free:
+            return "writing.free."
+        case .material:
+            return "writing.material.\(sourceKind.rawValue).\(selectedSegmentID?.uuidString ?? "none")."
+        }
+    }
+
+    private func saveCurrentWritingDraft() {
+        editingDrafts.save(chinesePrompt, for: currentWritingDraftPrefix + "prompt")
+        editingDrafts.save(learnerSpanish, for: currentWritingDraftPrefix + "spanish")
+        editingDrafts.save(referenceSpanish, for: currentWritingDraftPrefix + "reference")
+        editingDrafts.save(focus, for: currentWritingDraftPrefix + "focus")
+    }
+
+    private func restoreCurrentWritingDraft() {
+        let prefix = currentWritingDraftPrefix
+        guard ["prompt", "spanish", "reference", "focus"].contains(where: {
+            editingDrafts.draft(for: prefix + $0) != nil
+        }) else { return }
+        chinesePrompt = editingDrafts.draft(for: prefix + "prompt") ?? chinesePrompt
+        learnerSpanish = editingDrafts.draft(for: prefix + "spanish") ?? learnerSpanish
+        referenceSpanish = editingDrafts.draft(for: prefix + "reference") ?? referenceSpanish
+        focus = editingDrafts.draft(for: prefix + "focus") ?? focus
+    }
+
+    private func clearWritingDraft(for prefix: String) {
+        editingDrafts.removeDrafts(withPrefix: prefix)
     }
 
     private func reviewChineseDraft() {
@@ -515,6 +568,7 @@ struct WritingView: View {
             sourceSegmentID: source?.segmentID, sourceQuote: source?.text,
             referenceSpanish: requestedReferenceSpanish, focus: requestedFocus
         )
+        let submittedDraftPrefix = currentWritingDraftPrefix
         working = true
         notice = "正在检查意思、语法、用词和自然度…"
         Task {
@@ -565,6 +619,7 @@ struct WritingView: View {
                 )
                 let stillShowingSubmittedContext = currentContext == requestedContext
                 if stillShowingSubmittedContext {
+                    clearWritingDraft(for: submittedDraftPrefix)
                     selectedExerciseID = saved.exerciseID
                     feedback = WritingFeedbackDisplay(feedback: audited.feedback,
                                                       correctedSpanish: audited.correctedSpanish,

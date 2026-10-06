@@ -136,7 +136,7 @@ private struct CardLibraryRow: View {
     @EnvironmentObject private var store: StudyStore
     let card: StudyCard
     var body: some View {
-        GlassCard(accent: GlassTheme.violet) {
+        GlassCard {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     CardTagView(kind: .category(card.category), showsIcon: false)
@@ -173,6 +173,7 @@ private struct CardDetailSheet: View {
     }
 
     @EnvironmentObject private var store: StudyStore
+    @EnvironmentObject private var editingDrafts: EditingDraftStore
     let cardID: UUID
     let onClose: () -> Void
     @State private var feedback = ""
@@ -184,6 +185,7 @@ private struct CardDetailSheet: View {
     @State private var aiPanelExpanded = false
     @State private var editing = false
     @State private var confirmingTrash = false
+    @State private var confirmingDiscardEdit = false
     @State private var editTitle = ""
     @State private var editQuestion = ""
     @State private var editAnswer = ""
@@ -234,7 +236,7 @@ private struct CardDetailSheet: View {
         .frame(width: 720)
         .frame(maxHeight: 760)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.22)))
+        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(AppPalette.separator))
         .shadow(color: .black.opacity(0.3), radius: 26, y: 12)
         .confirmationDialog("确定将这张卡片移到回收站吗？之后可以恢复。",
                            isPresented: $confirmingTrash, titleVisibility: .visible) {
@@ -244,15 +246,26 @@ private struct CardDetailSheet: View {
 
             Button("取消", role: .cancel) {}
         }
+        .alert("放弃尚未保存的卡片修改？", isPresented: $confirmingDiscardEdit) {
+            Button("放弃修改", role: .destructive) { discardEdit() }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("放弃后会恢复卡片原文。")
+        }
+        .onAppear { restoreEditDraftIfPresent() }
+        .onChange(of: editTitle) { _, value in saveEditDraft(value, field: "title") }
+        .onChange(of: editQuestion) { _, value in saveEditDraft(value, field: "question") }
+        .onChange(of: editAnswer) { _, value in saveEditDraft(value, field: "answer") }
+        .onChange(of: feedback) { _, value in
+            editingDrafts.save(value, for: cardDraftPrefix + "feedback")
+        }
     }
 
     private func actionBar(_ card: StudyCard, includesConfirmation: Bool = false) -> some View {
         HStack(alignment: .center, spacing: Layout.small) {
             HStack(spacing: Layout.small) {
             Button("编辑") {
-                editTitle = card.title ?? card.question
-                editQuestion = card.question
-                editAnswer = card.answer
+                loadEditDraft(for: card)
                 editing = true
             }
             .buttonStyle(AppActionButtonStyle())
@@ -292,8 +305,17 @@ private struct CardDetailSheet: View {
             TextEditor(text: $editQuestion).frame(minHeight: 80).studyInputChrome()
             Text("背面").font(AppType.ui(15, weight: .semibold))
             TextEditor(text: $editAnswer).frame(minHeight: 150).studyInputChrome()
+            Label("编辑草稿会自动保留在本机；保存后才会修改卡片。", systemImage: "externaldrive")
+                .font(AppType.ui(12))
+                .foregroundStyle(.secondary)
             HStack {
-                Button("取消") { editing = false }
+                Button("放弃修改") {
+                    if hasUnsavedCardChanges(card) {
+                        confirmingDiscardEdit = true
+                    } else {
+                        discardEdit()
+                    }
+                }
                 Spacer()
                 Button("保存修改") { saveEditedCard(card) }
                     .buttonStyle(AppActionButtonStyle(prominent: true))
@@ -304,9 +326,59 @@ private struct CardDetailSheet: View {
     private func saveEditedCard(_ card: StudyCard) {
         do {
             try store.updateCardContent(card.id, title: editTitle, question: editQuestion, answer: editAnswer)
+            editingDrafts.removeDrafts(withPrefix: cardDraftPrefix)
             editing = false
             notice = "卡片修改已保存。"
         } catch { notice = error.localizedDescription }
+    }
+
+    private var cardDraftPrefix: String { "card.\(cardID.uuidString)." }
+
+    private func saveEditDraft(_ value: String, field: String) {
+        guard editing, let card else { return }
+        let original: String
+        switch field {
+        case "title": original = card.title ?? card.question
+        case "question": original = card.question
+        case "answer": original = card.answer
+        default: return
+        }
+        let key = cardDraftPrefix + field
+        if value == original {
+            editingDrafts.removeDraft(for: key)
+        } else {
+            editingDrafts.save(value, for: key)
+        }
+    }
+
+    private func loadEditDraft(for card: StudyCard) {
+        editTitle = editingDrafts.draft(for: cardDraftPrefix + "title") ?? (card.title ?? card.question)
+        editQuestion = editingDrafts.draft(for: cardDraftPrefix + "question") ?? card.question
+        editAnswer = editingDrafts.draft(for: cardDraftPrefix + "answer") ?? card.answer
+    }
+
+    private func restoreEditDraftIfPresent() {
+        feedback = editingDrafts.draft(for: cardDraftPrefix + "feedback") ?? ""
+        aiPanelExpanded = !feedback.isEmpty
+        guard let card,
+              ["title", "question", "answer"].contains(where: {
+                  editingDrafts.draft(for: cardDraftPrefix + $0) != nil
+              }) else { return }
+        loadEditDraft(for: card)
+        editing = true
+    }
+
+    private func hasUnsavedCardChanges(_ card: StudyCard) -> Bool {
+        editTitle != (card.title ?? card.question) ||
+            editQuestion != card.question ||
+            editAnswer != card.answer
+    }
+
+    private func discardEdit() {
+        editingDrafts.removeDrafts(withPrefix: cardDraftPrefix)
+        if let card { loadEditDraft(for: card) }
+        editing = false
+        notice = "已放弃修改；卡片原文未更改。"
     }
 
     private func moveToTrash(_ card: StudyCard) {
@@ -343,7 +415,7 @@ private struct CardDetailSheet: View {
         VStack(alignment: .leading, spacing: Layout.medium) {
             Text("正面")
                 .font(AppType.ui(12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(AppPalette.secondaryInk)
             if let title = card.title, !title.isEmpty {
                 Text(title)
                     .font(AppType.ui(17, weight: .semibold))
@@ -357,7 +429,7 @@ private struct CardDetailSheet: View {
                 Divider()
                 Text("背面")
                     .font(AppType.ui(12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(AppPalette.secondaryInk)
                 Text(card.answer).font(AppType.ui(17)).lineSpacing(5).textSelection(.enabled)
             } else {
                 Button("显示答案") { answerVisible = true }
@@ -369,19 +441,11 @@ private struct CardDetailSheet: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(22)
-        .background(
-            LinearGradient(colors: [
-                Color.white.opacity(0.08),
-                Color.white.opacity(0.05)
-            ], startPoint: .topLeading, endPoint: .bottomTrailing),
-            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-        )
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(.white.opacity(0.20), lineWidth: 1)
-                .blendMode(.overlay)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(AppPalette.separator, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.25), radius: 16, y: 8)
     }
 
     private func sources(_ card: StudyCard) -> some View {
@@ -511,8 +575,8 @@ private struct CardDetailSheet: View {
             }
         }
         .padding(16)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.white.opacity(0.12)))
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(AppPalette.separator))
     }
 
     private func nextIntervalText(_ due: Date?) -> String {

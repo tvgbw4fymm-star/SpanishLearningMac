@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReadingView: View {
     @EnvironmentObject private var store: StudyStore
+    @EnvironmentObject private var editingDrafts: EditingDraftStore
     @Binding var selectedArticleID: UUID?
     @State private var chunkIndex = 0
     @State private var difficulty: ReadingDifficulty = .understood
@@ -12,10 +13,6 @@ struct ReadingView: View {
     @State private var status: String?
     @State private var working = false
     @State private var isAuditingCards = false
-
-    private let ink = Color(red: 0.91, green: 0.89, blue: 0.95)
-    private let secondaryInk = Color(red: 0.78, green: 0.75, blue: 0.84)
-    private let accentInk = Color(red: 0.88, green: 0.78, blue: 1.00)
 
     private var article: ReadingArticle? {
         store.data.articles.first(where: { $0.id == selectedArticleID }) ?? store.data.articles.first
@@ -32,9 +29,11 @@ struct ReadingView: View {
                     Menu {
                         ForEach(store.data.articles) { item in
                             Button(item.title) {
+                                saveCurrentReadingDraft()
                                 selectedArticleID = item.id
                                 chunkIndex = 0
                                 resetCompletionDraft()
+                                restoreCurrentReadingDraft()
                             }
                         }
                     } label: {
@@ -43,7 +42,7 @@ struct ReadingView: View {
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.down")
                                 .font(AppType.ui(13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.86))
+                                .foregroundStyle(AppPalette.secondaryInk)
                         }
                     }
                     .menuIndicator(.hidden)
@@ -82,7 +81,10 @@ struct ReadingView: View {
         .onAppear {
             do { try store.resegmentUnstudiedArticles() }
             catch { status = error.localizedDescription }
+            restoreCurrentReadingDraft()
         }
+        .onChange(of: questionDraft) { _, _ in saveCurrentReadingDraft() }
+        .onChange(of: note) { _, _ in saveCurrentReadingDraft() }
         .sheet(isPresented: $importSheet) {
             ArticleImportSheet(errorMessage: $status, working: $working) { text in
                 importArticle(text, fromSheet: true)
@@ -120,15 +122,15 @@ struct ReadingView: View {
                 .font(AppType.ui(34, weight: .light))
                 .foregroundStyle(GlassTheme.cyan)
                 .frame(width: 64, height: 64)
-                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
+                .background(AppPalette.selected, in: RoundedRectangle(cornerRadius: 18))
             VStack(alignment: .leading, spacing: 12) {
                 Text("从一篇文章开始。")
                     .font(AppType.ui(30, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(AppPalette.ink)
                 Text("粘贴你感兴趣的西语原文。导入后会分成约 50 词的段落，方便逐段通读、提问和积累卡片。")
                     .font(AppType.ui(16))
                     .lineSpacing(7)
-                    .foregroundStyle(.white.opacity(0.76))
+                    .foregroundStyle(AppPalette.secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
@@ -136,20 +138,20 @@ struct ReadingView: View {
                 Label("提问与卡片", systemImage: "rectangle.stack")
             }
             .font(AppType.ui(15, weight: .medium))
-            .foregroundStyle(.white.opacity(0.72))
+            .foregroundStyle(AppPalette.secondaryInk)
             Spacer(minLength: 0)
         }
         .padding(32)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 34))
-        .overlay(RoundedRectangle(cornerRadius: 34).strokeBorder(.white.opacity(0.17)))
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator))
     }
 
     private var inlineArticleImport: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("导入文章")
                 .font(AppType.ui(23, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(AppPalette.ink)
             TextEditor(text: $newText)
                 .font(AppType.ui(16))
                 .scrollContentBackground(.hidden)
@@ -160,7 +162,7 @@ struct ReadingView: View {
             HStack {
                 Text("粘贴西语正文")
                     .font(AppType.ui(15, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.62))
+                    .foregroundStyle(AppPalette.secondaryInk)
                 Spacer()
                 Button("导入并切段", systemImage: "arrow.right") { importInlineArticle() }
                     .buttonStyle(AppActionButtonStyle(prominent: true))
@@ -169,8 +171,8 @@ struct ReadingView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 34))
-        .overlay(RoundedRectangle(cornerRadius: 34).strokeBorder(.white.opacity(0.17)))
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator))
     }
 
     private func importInlineArticle() { importArticle(newText, fromSheet: false) }
@@ -186,6 +188,7 @@ struct ReadingView: View {
                 selectedArticleID = store.data.articles.last?.id
                 chunkIndex = 0
                 resetCompletionDraft()
+                restoreCurrentReadingDraft()
                 newText = ""
                 if fromSheet { importSheet = false }
                 status = nil
@@ -200,44 +203,47 @@ struct ReadingView: View {
                 Text(chunk.text)
                     .font(AppType.reading(20))
                     .lineSpacing(9)
-                    .foregroundStyle(ink)
+                    .foregroundStyle(AppPalette.ink)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 20)
             }
-            Divider().overlay(secondaryInk.opacity(0.16))
+            Divider()
             HStack(spacing: 12) {
                 Button("上一段", systemImage: "chevron.left") { changeChunk(-1) }
                     .disabled(chunkIndex == 0)
                 Spacer()
                 Text("\(chunk.ordinal) / \(article.chunks.count)")
                     .font(AppType.ui(15, weight: .medium))
-                    .foregroundStyle(secondaryInk)
+                    .foregroundStyle(AppPalette.secondaryInk)
                 Spacer()
                 Button("下一段", systemImage: "chevron.right") { changeChunk(1) }
                     .disabled(chunkIndex >= article.chunks.count - 1)
             }
-            .foregroundStyle(accentInk)
+            .foregroundStyle(Color.accentColor)
             .buttonStyle(.plain)
             .padding(.top, 14)
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 36))
-        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.18)).allowsHitTesting(false))
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator).allowsHitTesting(false))
     }
 
     private func studyPanel(article: ReadingArticle, chunk: ReadingChunk) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("精读提问")
                 .font(AppType.ui(17, weight: .semibold))
-                .foregroundStyle(ink)
+                .foregroundStyle(AppPalette.ink)
+            Label("问题和备注草稿会自动保存在本机。", systemImage: "externaldrive")
+                .font(AppType.ui(12))
+                .foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if (chunk.discussion ?? []).isEmpty {
                         Text("选中文中不懂的地方，直接提问。")
                             .font(AppType.ui(15, weight: .regular))
-                            .foregroundStyle(secondaryInk)
+                            .foregroundStyle(AppPalette.secondaryInk)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 10)
                     }
@@ -246,14 +252,14 @@ struct ReadingView: View {
                             // Question (highlighted)
                             ZStack(alignment: .leading) {
                                 RoundedRectangle(cornerRadius: 14)
-                                    .fill(accentInk.opacity(0.18))
+                                    .fill(AppPalette.selected)
                                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                                     RoundedRectangle(cornerRadius: 3)
-                                        .fill(accentInk)
+                                        .fill(Color.accentColor)
                                         .frame(width: 4, height: 18)
                                     Text(item.question)
                                         .font(AppType.ui(15, weight: .semibold))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(AppPalette.ink)
                                         .lineLimit(nil)
                                 }
                                 .padding(.horizontal, 10)
@@ -264,25 +270,25 @@ struct ReadingView: View {
                             // Answer
                             Text(item.answer)
                                 .font(AppType.ui(15, weight: .regular))
-                                .foregroundStyle(ink)
+                                .foregroundStyle(AppPalette.ink)
                                 .lineSpacing(6)
                                 .textSelection(.enabled)
                         }
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 20))
-                        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.14)))
+                        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppPalette.separator))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
-            Divider().overlay(secondaryInk.opacity(0.16))
+            Divider()
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("想问什么？", text: $questionDraft, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .foregroundStyle(ink)
+                    .foregroundStyle(AppPalette.ink)
                     .lineLimit(1...3)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
@@ -294,18 +300,18 @@ struct ReadingView: View {
             }
             Text("理解难度")
                 .font(AppType.ui(12, weight: .semibold))
-                .foregroundStyle(secondaryInk)
+                .foregroundStyle(AppPalette.secondaryInk)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
                 ForEach(ReadingDifficulty.allCases) { value in
                     Button { difficulty = value } label: {
                         Text(value.rawValue)
                             .font(AppType.ui(14, weight: .medium))
-                            .foregroundStyle(difficulty == value ? ink : secondaryInk)
+                            .foregroundStyle(difficulty == value ? Color.accentColor : AppPalette.secondaryInk)
                             .frame(maxWidth: .infinity, minHeight: 42)
-                            .background(difficulty == value ? .white.opacity(0.22) : .white.opacity(0.08),
+                            .background(difficulty == value ? AppPalette.selected : AppPalette.surface,
                                         in: RoundedRectangle(cornerRadius: 19))
                             .overlay(RoundedRectangle(cornerRadius: 19)
-                                .strokeBorder(.white.opacity(difficulty == value ? 0.48 : 0.14))
+                                .strokeBorder(difficulty == value ? Color.accentColor.opacity(0.45) : AppPalette.separator)
                                 .allowsHitTesting(false))
                             .contentShape(RoundedRectangle(cornerRadius: 19))
                     }
@@ -315,7 +321,7 @@ struct ReadingView: View {
             }
             TextField("本段备注（可留空）", text: $note)
                 .textFieldStyle(.plain)
-                .foregroundStyle(ink)
+                .foregroundStyle(AppPalette.ink)
                 .padding(.horizontal, 12)
                 .frame(minHeight: 38)
                 .studyInputChrome()
@@ -324,7 +330,7 @@ struct ReadingView: View {
                 if let status {
                     Text(status)
                         .font(AppType.ui(12, weight: .regular))
-                        .foregroundStyle(secondaryInk)
+                        .foregroundStyle(AppPalette.secondaryInk)
                         .lineLimit(2)
                         .textSelection(.enabled)
                 }
@@ -336,13 +342,15 @@ struct ReadingView: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 36))
-        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.18)).allowsHitTesting(false))
+        .background(AppPalette.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(AppPalette.separator).allowsHitTesting(false))
     }
 
     private func changeChunk(_ delta: Int) {
+        saveCurrentReadingDraft()
         chunkIndex += delta
         resetCompletionDraft()
+        restoreCurrentReadingDraft()
     }
 
     private func resetCompletionDraft() {
@@ -350,6 +358,30 @@ struct ReadingView: View {
         questionDraft = ""
         note = ""
         status = nil
+    }
+
+    private func currentReadingDraftPrefix(for article: ReadingArticle? = nil,
+                                           chunkIndex: Int? = nil) -> String? {
+        let targetChunkIndex = chunkIndex ?? self.chunkIndex
+        guard let article = article ?? self.article,
+              article.chunks.indices.contains(targetChunkIndex) else { return nil }
+        return "reading.\(article.id.uuidString).\(article.chunks[targetChunkIndex].id.uuidString)."
+    }
+
+    private func saveCurrentReadingDraft() {
+        guard let prefix = currentReadingDraftPrefix() else { return }
+        editingDrafts.save(questionDraft, for: prefix + "question")
+        editingDrafts.save(note, for: prefix + "note")
+    }
+
+    private func restoreCurrentReadingDraft() {
+        guard let prefix = currentReadingDraftPrefix() else {
+            questionDraft = ""
+            note = ""
+            return
+        }
+        questionDraft = editingDrafts.draft(for: prefix + "question") ?? ""
+        note = editingDrafts.draft(for: prefix + "note") ?? ""
     }
 
     private func apiKey() throws -> String {
@@ -361,6 +393,7 @@ struct ReadingView: View {
     private func ask(article: ReadingArticle, chunk: ReadingChunk) {
         let question = questionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
+        let requestDraftPrefix = "reading.\(article.id.uuidString).\(chunk.id.uuidString)."
         let key: String
         do { key = try apiKey() }
         catch { status = error.localizedDescription; return }
@@ -375,8 +408,13 @@ struct ReadingView: View {
                                                                question: question, apiKey: key)
                 try store.saveReadingDiscussion(articleID: article.id, chunkID: chunk.id,
                                                 question: question, answer: result.answer)
-                questionDraft = ""
-                status = "回答已保存在本段精读记录中。"
+                if questionDraft.trimmingCharacters(in: .whitespacesAndNewlines) == question {
+                    editingDrafts.removeDraft(for: requestDraftPrefix + "question")
+                    if currentReadingDraftPrefix() == requestDraftPrefix { questionDraft = "" }
+                }
+                if currentReadingDraftPrefix() == requestDraftPrefix {
+                    status = "回答已保存在本段精读记录中。"
+                }
             } catch { status = error.localizedDescription }
             working = false
         }
@@ -388,7 +426,12 @@ struct ReadingView: View {
             do {
                 try store.completeReadingWithCards(articleID: article.id, chunkID: chunk.id,
                                                    difficulty: difficulty, note: note, result: nil)
-                status = "本段阅读记录已保存；没有新的待整理提问。"
+                let requestDraftPrefix = "reading.\(article.id.uuidString).\(chunk.id.uuidString)."
+                if currentReadingDraftPrefix() == requestDraftPrefix {
+                    editingDrafts.removeDraft(for: requestDraftPrefix + "note")
+                    note = ""
+                    status = "本段阅读记录已保存；没有新的待整理提问。"
+                }
             } catch { status = error.localizedDescription }
             return
         }
@@ -402,6 +445,7 @@ struct ReadingView: View {
         // (e.g. after navigating to a different chunk) and write it into this chunk's record.
         let requestedDifficulty = difficulty
         let requestedNote = note
+        let requestDraftPrefix = "reading.\(article.id.uuidString).\(chunk.id.uuidString)."
         Task {
             do {
                 let result = try await ReadingAIService.organizeCards(articleTitle: article.title,
@@ -430,9 +474,15 @@ struct ReadingView: View {
                 try store.completeReadingWithCards(articleID: article.id, chunkID: chunk.id,
                                                    difficulty: requestedDifficulty, note: requestedNote, result: auditedResult)
                 let count = result.cards.filter(\.create).count
-                status = fallbackCount == 0
-                    ? "本段阅读已完成，新增整理 \(count) 个卡片要点。"
-                    : "本段阅读已完成，新增整理 \(count) 个卡片要点。\(fallbackCount) 张使用基础整理版本；可在卡片详情中重新整理。"
+                if note == requestedNote, currentReadingDraftPrefix() == requestDraftPrefix {
+                    editingDrafts.removeDraft(for: requestDraftPrefix + "note")
+                    note = ""
+                }
+                if currentReadingDraftPrefix() == requestDraftPrefix {
+                    status = fallbackCount == 0
+                        ? "本段阅读已完成，新增整理 \(count) 个卡片要点。"
+                        : "本段阅读已完成，新增整理 \(count) 个卡片要点。\(fallbackCount) 张使用基础整理版本；可在卡片详情中重新整理。"
+                }
             } catch { status = error.localizedDescription }
             isAuditingCards = false
             working = false
@@ -465,6 +515,7 @@ struct ArticleImportSheet: View {
         }
         .padding(28)
         .frame(width: 650, height: 500)
+        .interactiveDismissDisabled(!text.isEmpty || working)
     }
 }
 
