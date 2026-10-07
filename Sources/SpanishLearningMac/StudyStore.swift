@@ -20,7 +20,7 @@ final class StudyStore: ObservableObject {
 
     init(baseDirectory: URL? = nil) {
         let base = baseDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("SpanishLearningMac", isDirectory: true)
+            .appendingPathComponent("SpanishLearningMac-UI-Lab", isDirectory: true)
         supportDirectory = base
         let modelCache = base.appendingPathComponent("Models/WhisperKit", isDirectory: true)
         whisperTranscriptionService = WhisperKitTranscriptionService(cacheDirectory: modelCache)
@@ -1186,7 +1186,7 @@ final class StudyStore: ObservableObject {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         let directory = supportDirectory.deletingLastPathComponent()
-            .appendingPathComponent("SpanishLearningMac Backups", isDirectory: true)
+            .appendingPathComponent("\(supportDirectory.lastPathComponent) Backups", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent("自动备份-\(formatter.string(from: now)).zip")
         let encoder = JSONEncoder()

@@ -13,11 +13,13 @@ if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENT
 fi
 BUILD_ROOT="$(mktemp -d /private/tmp/spanish-learning-design.XXXXXX)"
 APP_PATH="$BUILD_ROOT/西语学习-精读交互修复预览.app"
-ARCHIVE_PATH="$PROJECT_ROOT/dist/西语学习-精读交互修复预览.zip"
-INSTALLED_APP_PATH="$PROJECT_ROOT/dist/西语学习-精读交互修复预览.app"
+OUTPUT_ROOT="$PROJECT_ROOT/dist-ui-lab"
+ARCHIVE_PATH="$OUTPUT_ROOT/西语学习-精读交互修复预览.zip"
+INSTALLED_APP_PATH="$OUTPUT_ROOT/西语学习-精读交互修复预览.app"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 
 swift build --package-path "$PROJECT_ROOT" --scratch-path "$BUILD_ROOT/build" -c release
+mkdir -p "$OUTPUT_ROOT"
 BIN_PATH="$BUILD_ROOT/build/release/SpanishLearningMac"
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 cp "$BIN_PATH" "$APP_PATH/Contents/MacOS/SpanishLearningMac"
@@ -61,6 +63,10 @@ for bundle in "$INSTALLED_APP_PATH" "$INSTALLED_APP_PATH/Contents/Resources/Span
   xattr -d com.apple.FinderInfo "$bundle" 2>/dev/null || true
 done
 codesign --force --sign "$SIGN_IDENTITY" "$INSTALLED_APP_PATH"
+for bundle in "$INSTALLED_APP_PATH" "$INSTALLED_APP_PATH/Contents/Resources/SpanishLearningMac_SpanishLearningMac.bundle"; do
+  xattr -d 'com.apple.fileprovider.fpfs#P' "$bundle" 2>/dev/null || true
+  xattr -d com.apple.FinderInfo "$bundle" 2>/dev/null || true
+done
 codesign --verify --deep --strict "$INSTALLED_APP_PATH"
 plutil -extract NSSpeechRecognitionUsageDescription raw -o - "$INSTALLED_APP_PATH/Contents/Info.plist" >/dev/null
 print "已生成：$INSTALLED_APP_PATH"

@@ -8,6 +8,10 @@ set -euo pipefail
 # Does not commit or touch user data.
 
 PROJECT_ROOT="${0:A:h:h}"
+if [[ "$(git -C "$PROJECT_ROOT" branch --show-current)" == "ui-redesign-next" ]]; then
+  echo "Refusing to build the production app from the UI Lab worktree." >&2
+  exit 1
+fi
 APP_DISPLAY_NAME="西语喵"
 BUNDLE_ID="com.kda.spanishlearningmac"
 source "$PROJECT_ROOT/scripts/app-version.sh"

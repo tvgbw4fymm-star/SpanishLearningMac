@@ -108,7 +108,9 @@ enum BackupManager {
         _ = try validate(root: root)
 
         let hadCurrent = fm.fileExists(atPath: supportDirectory.path)
-        let backupFolder = parent.appendingPathComponent("SpanishLearningMac Backups", isDirectory: true)
+        let backupFolder = parent.appendingPathComponent(
+            "\(supportDirectory.lastPathComponent) Backups", isDirectory: true
+        )
         var safetyCopy: URL?
         if hadCurrent {
             try fm.createDirectory(at: backupFolder, withIntermediateDirectories: true)

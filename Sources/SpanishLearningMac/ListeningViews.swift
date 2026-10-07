@@ -1900,7 +1900,8 @@ private struct PasteSubtitleSheet: View {
 
     private func importPasted() {
         do {
-            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("PastedSubtitle-\(UUID().uuidString).srt")
+            let temp = TranscriptionService.temporaryDirectory
+                .appendingPathComponent("PastedSubtitle-\(UUID().uuidString).srt")
             try text.data(using: .utf8)?.write(to: temp)
             try store.importSubtitles(from: temp, materialID: materialID)
             try? FileManager.default.removeItem(at: temp)

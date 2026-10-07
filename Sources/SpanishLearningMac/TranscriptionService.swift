@@ -217,6 +217,12 @@ private extension String {
 }
 
 enum TranscriptionService {
+    static var temporaryDirectory: URL {
+        let identifier = Bundle.main.bundleIdentifier ?? "com.kda.spanishlearningmac.uilab"
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent(identifier, isDirectory: true)
+    }
+
     static func recognizeSentence(audioURL: URL, start: Double, end: Double) async throws -> String {
         guard Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil else {
             throw TranscriptionError.missingUsageDescription
@@ -233,7 +239,7 @@ enum TranscriptionService {
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             throw TranscriptionError.onDeviceUnavailable
         }
-        let work = FileManager.default.temporaryDirectory.appendingPathComponent("SpanishSentence-\(UUID().uuidString)", isDirectory: true)
+        let work = temporaryDirectory.appendingPathComponent("SpanishSentence-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: work) }
         let clip = try AudioChunker.slice(audioURL, from: start, to: end, into: work)
         let result = try await recognize(clip, with: recognizer)
@@ -258,7 +264,7 @@ enum TranscriptionService {
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             throw TranscriptionError.onDeviceUnavailable
         }
-        let work = FileManager.default.temporaryDirectory.appendingPathComponent("SpanishTranscription-\(UUID().uuidString)", isDirectory: true)
+        let work = temporaryDirectory.appendingPathComponent("SpanishTranscription-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: work) }
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         var offset = start

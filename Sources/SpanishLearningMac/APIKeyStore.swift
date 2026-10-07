@@ -15,7 +15,7 @@ enum APIKeyStoreError: LocalizedError {
 
 enum APIKeyStore {
     private static func service(for provider: AIProvider) -> String {
-        "com.kda.spanishlearningmac.\(provider.rawValue)"
+        "com.kda.spanishlearningmac.\(provider.rawValue).uilab"
     }
     private static let account = "personal-api-key"
 
